@@ -11,6 +11,7 @@
 pub mod args;
 mod backend;
 pub mod control_token;
+mod pdf_check;
 mod server;
 mod tools;
 

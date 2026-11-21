@@ -48,7 +48,7 @@ pub fn specs() -> Vec<CommandSpec> {
             .interactive(|_| Ok(Box::new(AreaM::default()))),
         CommandSpec::new("time", "Time", run_time).menu(&["Tools", "Inquiry", "Time"]).noundo(),
         CommandSpec::new("status", "Status", run_status).menu(&["Tools", "Inquiry", "Status"]).noundo(),
-        CommandSpec::new("drawing.inspect", "Inspect Drawing", run_inspect).params("{entities?: bool, limit?: n}").noundo(),
+        CommandSpec::new("drawing.inspect", "Inspect Drawing", run_inspect).params("{entities?: bool (default true), limit?: n (default 200), offset?: n}").noundo(),
         CommandSpec::new("entities", "Query Entities", run_entities)
             .params("{type?, layer?, selected?: bool (default false; true = current selection in active space), window?: [[x,y],[x,y]], crossing?: bool (default true; false = entirely inside), limit?, offset?} → {count (all matches), returned, offset, entities}")
             .noundo(),
@@ -56,7 +56,7 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("usage", "Analyze Usage", usage::run).params(usage::PARAMS).noundo(),
         CommandSpec::new("loops", "Implied Loops", loops::run).params(loops::PARAMS).noundo(),
         CommandSpec::new("texts", "Query Texts", run_texts)
-            .params("{contains?: text (any case; `query` is the same filter), layer?, window?: [[x,y],[x,y]] (by insertion point), limit? (default 200), offset?} → {count (all matches), returned, offset, texts: [{handle, type, layer, text, at, height, rotation (degrees), style, tag? (attributes)}]}: the readable text of TEXT, MTEXT (formatting removed), block attributes and multileaders")
+            .params("{contains?: text (any case; `query` is the same filter), layer?, window?: [[x,y],[x,y]] (by insertion point), dimensions?: bool (also the dimensions' texts), overlaps?: bool (list texts that print over each other), limit? (default 200), offset?} → {count (all matches), returned, offset, texts: [{handle, type, layer, text, at, height, rotation (degrees), style, tag? (attributes), box? [[x0,y0],[x1,y1]]}], overlapCount?, overlaps?: [[a, b]]}: the readable text of TEXT, MTEXT (formatting removed), block attributes, multileaders and (with dimensions) dimensions")
             .noundo(),
         CommandSpec::new("countlist", "Count List", count::run_countlist)
             .params("{space?: all (default)|current|model|<layout>, nested?: bool} → per-block counts, as COUNT")
@@ -588,13 +588,16 @@ fn entity_summary(e: &cadcraft_doc::Entity) -> Value {
 fn run_inspect(s: &mut Session, p: &Value) -> Result<Value> {
     let st = s.state()?;
     let d = &st.doc;
-    let limit = p.get("limit").and_then(Value::as_u64).unwrap_or(200) as usize;
+    let limit = p.get("limit").and_then(Value::as_u64).map_or(200, |n| usize::try_from(n).unwrap_or(usize::MAX));
+    let offset = p.get("offset").and_then(Value::as_u64).map_or(0, |n| usize::try_from(n).unwrap_or(usize::MAX));
     let space = st.space.clone();
     let ext = d.extents(&space);
     let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    let mut layer_counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     if let Some(store) = d.space(&space) {
         for e in store.iter() {
             *counts.entry(e.kind.type_name()).or_default() += 1;
+            *layer_counts.entry(e.common.layer.as_str()).or_default() += 1;
         }
     }
     let mut out = json!({
@@ -605,6 +608,8 @@ fn run_inspect(s: &mut Session, p: &Value) -> Result<Value> {
         "space": space.tab_name(),
         "entityCount": d.entity_count(),
         "counts": counts,
+        // Objects of the active space on each layer, to check a batch without listing them.
+        "layerCounts": layer_counts,
         "extents": if ext.is_empty() { Value::Null } else { json!([[ext.min.x, ext.min.y], [ext.max.x, ext.max.y]]) },
         "layers": d.layers.iter().map(|l| json!({"name": l.name, "on": l.on, "frozen": l.frozen, "locked": l.locked, "color": l.color.name(), "linetype": l.linetype})).collect::<Vec<_>>(),
         "currentLayer": d.header.str("CLAYER", "0"),
@@ -624,7 +629,14 @@ fn run_inspect(s: &mut Session, p: &Value) -> Result<Value> {
     if bool_or(p, "entities", true)
         && let (Some(o), Some(store)) = (out.as_object_mut(), d.space(&space))
     {
-        o.insert("entities".into(), Value::Array(store.iter().take(limit).map(|e| entity_summary(e)).collect()));
+        let total = store.len();
+        let shown: Vec<Value> = store.iter().skip(offset).take(limit).map(|e| entity_summary(e)).collect();
+        let next = offset.saturating_add(shown.len());
+        o.insert("entities".into(), Value::Array(shown));
+        o.insert("entitiesTotal".into(), json!(total));
+        if next < total {
+            o.insert("nextOffset".into(), json!(next));
+        }
     }
     Ok(out)
 }
@@ -704,14 +716,26 @@ fn run_texts(s: &mut Session, p: &Value) -> Result<Value> {
         .transpose()?;
     let limit = count("limit", 200)?;
     let offset = count("offset", 0)?;
+    let with_dims = bool_or(p, "dimensions", false);
+    let want_overlaps = bool_or(p, "overlaps", false);
     let st = s.state()?;
     let Some(store) = st.doc.space(&st.space) else { return Ok(json!({ "count": 0, "returned": 0, "offset": offset, "texts": [] })) };
+    let d = &st.doc;
     let mut found: Vec<Value> = Vec::new();
+    // The box each found text covers, for the overlap check (`None`: not measured).
+    let mut boxes: Vec<Option<cadcraft_geom::Bounds2>> = Vec::new();
     for e in store.iter() {
         if layer.as_ref().is_some_and(|l| e.common.layer.to_lowercase() != *l) {
             continue;
         }
-        let mut push = |ty: &str, value: String, at: cadcraft_geom::Vec3, height: f64, rotation: f64, style: &str, tag: Option<&str>| {
+        let mut push = |ty: &str,
+                        value: String,
+                        at: cadcraft_geom::Vec3,
+                        height: f64,
+                        rotation: f64,
+                        style: &str,
+                        tag: Option<&str>,
+                        bounds: Option<cadcraft_geom::Bounds2>| {
             let value = value.trim().to_string();
             if value.is_empty()
                 || contains.as_ref().is_some_and(|c| !value.to_lowercase().contains(c.as_str()))
@@ -719,34 +743,91 @@ fn run_texts(s: &mut Session, p: &Value) -> Result<Value> {
             {
                 return;
             }
+            let bounds = bounds.filter(|b| !b.is_empty() && b.min.is_finite() && b.max.is_finite());
             let mut v = json!({
                 "handle": e.handle.hex(), "type": ty, "layer": e.common.layer, "text": value,
                 "at": [at.x, at.y], "height": height, "rotation": rotation.to_degrees(), "style": style,
             });
-            if let (Some(t), Some(o)) = (tag, v.as_object_mut()) {
-                o.insert("tag".into(), json!(t));
+            if let Some(o) = v.as_object_mut() {
+                if let Some(t) = tag {
+                    o.insert("tag".into(), json!(t));
+                }
+                if let Some(b) = bounds {
+                    o.insert("box".into(), json!([[b.min.x, b.min.y], [b.max.x, b.max.y]]));
+                }
             }
             found.push(v);
+            boxes.push(bounds);
         };
+        let strokes_box = |pts: &mut dyn Iterator<Item = Vec2>| Some(cadcraft_geom::Bounds2::from_points(pts));
         match &e.kind {
-            EntityKind::Text(t) => push("Text", t.value.clone(), t.insert, t.height, t.rotation, &t.style, None),
-            EntityKind::MText(t) => push("MText", cadcraft_fonts::plain_mtext(&t.contents), t.insert, t.height, t.rotation, &t.style, None),
+            EntityKind::Text(t) => {
+                push("Text", t.value.clone(), t.insert, t.height, t.rotation, &t.style, None, Some(cadcraft_doc::entity_bounds(d, e, 0)));
+            }
+            EntityKind::MText(t) => {
+                let b = Some(cadcraft_doc::entity_bounds(d, e, 0));
+                push("MText", cadcraft_fonts::plain_mtext(&t.contents), t.insert, t.height, t.rotation, &t.style, None, b);
+            }
             EntityKind::Insert(i) => {
                 for a in i.attribs.iter().filter(|a| !a.invisible) {
-                    push("Attribute", a.text.value.clone(), a.text.insert, a.text.height, a.text.rotation, &a.text.style, Some(&a.tag));
+                    push("Attribute", a.text.value.clone(), a.text.insert, a.text.height, a.text.rotation, &a.text.style, Some(&a.tag), None);
                 }
             }
             EntityKind::MLeader(m) => {
                 if let Some(t) = &m.text {
-                    push("MLeader", cadcraft_fonts::plain_mtext(&t.contents), t.insert, t.height, t.rotation, &t.style, None);
+                    let b = strokes_box(&mut cadcraft_render::layout_mtext_entity(d, t).strokes.into_iter().flatten());
+                    push("MLeader", cadcraft_fonts::plain_mtext(&t.contents), t.insert, t.height, t.rotation, &t.style, None, b);
                 }
+            }
+            EntityKind::Dimension(dm) if with_dims => {
+                let g = cadcraft_render::dimension_in(d, dm);
+                let b = strokes_box(&mut g.text.iter().flatten().chain(g.text_glyphs.iter().flatten().flatten()).copied());
+                let at = cadcraft_geom::Vec3::new(g.text_pos.x, g.text_pos.y, 0.0);
+                push("Dimension", g.value.clone(), at, g.text_height, g.text_angle, &dm.style, None, b);
             }
             _ => {}
         }
     }
     let n = found.len();
+    let overlaps = want_overlaps.then(|| text_overlaps(&found, &boxes));
     let page: Vec<Value> = found.into_iter().skip(offset).take(limit).collect();
-    Ok(json!({ "count": n, "returned": page.len(), "offset": offset, "texts": page }))
+    let mut out = json!({ "count": n, "returned": page.len(), "offset": offset, "texts": page });
+    if let (Some((pairs, total)), Some(o)) = (overlaps, out.as_object_mut()) {
+        o.insert("overlapCount".into(), json!(total));
+        o.insert("overlaps".into(), json!(pairs));
+    }
+    Ok(out)
+}
+
+/// At most this many overlapping pairs are listed (`overlapCount` gives the total), and the check
+/// runs on at most this many texts, as it compares each with every other.
+const MAX_OVERLAPS: usize = 500;
+const MAX_OVERLAP_TEXTS: usize = 20_000;
+
+/// The pairs of found texts whose boxes overlap by more than a sliver (a tenth of the smaller
+/// text height each way): texts that print over each other.
+fn text_overlaps(found: &[Value], boxes: &[Option<cadcraft_geom::Bounds2>]) -> (Vec<Value>, usize) {
+    let mut pairs = Vec::new();
+    let mut total = 0usize;
+    let height = |i: usize| found.get(i).and_then(|v| v["height"].as_f64()).filter(|h| h.is_finite() && *h > 0.0).unwrap_or(0.0);
+    let n = boxes.len().min(MAX_OVERLAP_TEXTS);
+    for i in 0..n {
+        let Some(a) = boxes[i] else { continue };
+        for (j, b) in boxes.iter().enumerate().take(n).skip(i + 1) {
+            let Some(b) = b else { continue };
+            let margin = height(i).min(height(j)) * 0.1;
+            let x = a.max.x.min(b.max.x) - a.min.x.max(b.min.x);
+            let y = a.max.y.min(b.max.y) - a.min.y.max(b.min.y);
+            if x > margin && y > margin {
+                total += 1;
+                if pairs.len() < MAX_OVERLAPS {
+                    let pick = |k: usize| found.get(k).map(|v| json!({"handle": v["handle"], "type": v["type"], "text": v["text"]}));
+                    pairs.push(json!([pick(i), pick(j)]));
+                }
+            }
+        }
+    }
+    (pairs, total)
 }
 
 mod count;

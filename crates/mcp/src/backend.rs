@@ -70,7 +70,7 @@ impl Remote {
     }
     /// The app at `addr`, reached at the first call instead of now, so an MCP client can start
     /// the server before the app is open. With `launch`, a call that finds nothing at `addr`
-    /// opens the app with that control port first (macOS) and waits for it.
+    /// opens the app with that control port first ([`launch_app`]) and waits for it.
     pub fn lazy(addr: &str, launch: bool) -> Self {
         Self { addr: addr.to_string(), conn: None, next_id: 1, launch, token: None, max_reply: MAX_REPLY_LINE }
     }
@@ -188,14 +188,48 @@ fn not_open(addr: &str, e: std::io::Error) -> std::io::Error {
     )
 }
 
-/// Open the app with the control port of `addr` (macOS: `open -a CADCraft`).
+/// Open the app with the control port of `addr`: `open -a CADCraft` on macOS; elsewhere the
+/// `cadcraft` executable installed beside this one (`cadcraft-cli`), as the packages install them.
 fn launch_app(addr: &str) -> std::io::Result<()> {
     let port = addr.rsplit(':').next().filter(|p| p.parse::<u16>().is_ok()).ok_or_else(|| std::io::Error::other(format!("no port in {addr}")))?;
     if cfg!(target_os = "macos") {
         let ok = std::process::Command::new("open").args(["-a", "CADCraft", "--args", "--control", port]).status()?.success();
-        if ok { Ok(()) } else { Err(std::io::Error::other("could not open CADCraft (is it in Applications?)")) }
-    } else {
-        Err(std::io::Error::other(format!("CADCraft is not running; start it with `cadcraft --control {port}`")))
+        return if ok { Ok(()) } else { Err(std::io::Error::other("could not open CADCraft (is it in Applications?)")) };
+    }
+    let app = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(format!("cadcraft{}", std::env::consts::EXE_SUFFIX))))
+        .filter(|app| app.is_file())
+        .ok_or_else(|| std::io::Error::other(format!("CADCraft is not running and no `cadcraft` executable was found beside this one; start it with `cadcraft --control {port}`")))?;
+    spawn_detached(&app, port).map_err(|e| std::io::Error::new(e.kind(), format!("could not open {}: {e}", app.display())))
+}
+
+/// Start the app without handing it the MCP server's stdin and stdout (the protocol's stream) or
+/// stderr, so it outlives a server its client restarts.
+fn spawn_detached(app: &std::path::Path, port: &str) -> std::io::Result<()> {
+    use std::process::{Command, Stdio};
+    let command = || {
+        let mut c = Command::new(app);
+        c.args(["--control", port]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        c
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // Its own process group, so a console Ctrl+C meant for the server spares it, and out of the
+        // client's job object when the job allows it: a client that ends its servers' jobs would
+        // otherwise close the window with the server. A job that refuses breakaway fails the
+        // start, so it is tried again inside the job.
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+        if command().creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB).spawn().is_ok() {
+            return Ok(());
+        }
+        command().creation_flags(CREATE_NEW_PROCESS_GROUP).spawn().map(drop)
+    }
+    #[cfg(not(windows))]
+    {
+        command().spawn().map(drop)
     }
 }
 
@@ -316,7 +350,7 @@ const HEADLESS_METHODS: &[(&str, &str, &str)] = &[
     ("engine.execute", "{command, params}", "Run any command with JSON parameters. Never opens a dialog."),
     ("engine.commands", "", "Every command: id, label, menu path, shortcut, aliases, params doc, enabled."),
     ("drawing.inspect", "{entities?, limit?}", "Drawing summary and entities with handles and geometry."),
-    ("ui.render", "{path?, width?, height?, fit?, window?, background?, plot_style?}", "Render the drawing; replies pngBase64."),
+    ("ui.render", "{path?, width?, height?, fit?, window?, background?, plot_style?, layout?}", "Render the drawing (or the layout named); replies pngBase64."),
     ("app.open", "{path}", "Open a drawing."),
     ("app.save", "{path?}", "Save the drawing (Save As with a path)."),
     ("control.methods", "", "This list."),
@@ -364,7 +398,7 @@ impl Headless {
             "engine.execute" | "command" => {
                 let id = str_p("command").ok_or("missing `command`")?;
                 let params = p.get("params").cloned().filter(|v| !v.is_null()).unwrap_or(json!({}));
-                s.execute(&id, &params).map_err(|e| e.to_string())
+                s.execute_reported(&id, &params).map_err(|e| e.to_string())
             }
             "cmdline.input" => {
                 let before = s.log.len();
@@ -431,8 +465,10 @@ impl Headless {
                     plot_style_table: look.plot_style_table.clone(),
                     ..Default::default()
                 };
-                let list = cadcraft_render::build(&st.doc, &st.space, &opts);
-                let fit = p.get("fit").and_then(Value::as_bool).unwrap_or(true);
+                let space = cadcraft_engine::render_look::render_space(&st.doc, p, &st.space)?;
+                let list = cadcraft_render::build(&st.doc, &space, &opts);
+                // Another space than the one shown has no current view to keep: fit it.
+                let fit = p.get("fit").and_then(Value::as_bool).unwrap_or(true) || space != st.space;
                 let side = |k: &str| p.get(k).and_then(Value::as_f64).map(|x| x as u32);
                 let view = if let Some(win) = &window {
                     cadcraft_render::raster::View::of_window(win, side("width"), side("height"))

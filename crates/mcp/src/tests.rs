@@ -78,6 +78,146 @@ fn agent_draws_a_plate_with_holes() {
     assert!(img["data"].as_str().unwrap().len() > 100);
 }
 
+/// Guards that a command replying nothing of its own tells the agent what it did instead of
+/// `null`: the layer it added and made current, then the objects a later command created.
+#[test]
+fn execute_replies_what_a_silent_command_changed() {
+    let mut s = Server::new(Box::new(Headless::default()));
+    let r = tool(&mut s, "execute", json!({"command": "layer.new", "params": {"name": "Walls", "current": true}}));
+    assert_eq!(r["ok"], true, "{r}");
+    assert!(r["layersAdded"].as_array().is_some_and(|a| a.contains(&json!("Walls"))), "{r}");
+    assert_eq!(r["currentLayer"], "Walls");
+    let r = tool(&mut s, "execute", json!({"command": "layer.current", "params": {"name": "0"}}));
+    assert_eq!(r["currentLayer"], "0", "{r}");
+    let r = tool(&mut s, "execute", json!({"command": "zoom", "params": {"mode": "extents"}}));
+    assert!(r.is_object() && r["createdCount"].as_u64().unwrap_or(0) == 0, "zoom creates nothing: {r}");
+}
+
+/// Guards that a script leaves no command waiting for input unless asked to, so the agent's next
+/// line isn't read as a point; and that `keep` leaves it running with a warning.
+#[test]
+fn a_script_finishes_the_command_it_leaves_running() {
+    let mut s = Server::new(Box::new(Headless::default()));
+    let r = tool(&mut s, "script", json!({"text": "line 0,0 100,0 100,50"}));
+    assert_eq!(r["state"]["running"], Value::Null, "{r}");
+    assert_eq!(r["finished"]["command"], "line", "{r}");
+    let lines = tool(&mut s, "query_entities", json!({"type": "Line"}));
+    assert_eq!(lines["count"], 2, "both segments are kept: {lines}");
+    let r = tool(&mut s, "script", json!({"text": "line 0,0 0,80", "finish": "keep"}));
+    assert_eq!(r["state"]["running"], "line", "{r}");
+    assert!(r["warning"].as_str().is_some_and(|w| w.contains("line")), "{r}");
+}
+
+/// Guards that a JSON-only command typed in a script asks for its required parameters (the
+/// layer name of CLAYER) instead of failing the whole script, and that a failing line is named.
+#[test]
+fn scripts_take_json_only_commands_and_name_the_failing_line() {
+    let mut s = Server::new(Box::new(Headless::default()));
+    tool(&mut s, "execute", json!({"command": "layer.new", "params": {"name": "A-WALL"}}));
+    tool(&mut s, "script", json!({"text": "clayer A-WALL\nline 0,0 10,0\n\n"}));
+    let d = tool(&mut s, "inspect_drawing", json!({}));
+    assert_eq!(d["currentLayer"], "A-WALL", "{d}");
+    assert_eq!(d["layerCounts"]["A-WALL"], 1, "{d}");
+    let r = call(&mut s, 7, "tools/call", json!({"name": "script", "arguments": {"text": "line 0,0 5,5\n\nnosuchcommand\n"}}));
+    assert_eq!(r["result"]["isError"], true, "{r}");
+    let msg = r["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(msg.contains("line 3") && msg.contains("ran"), "{msg}");
+}
+
+/// Guards that inspect_drawing stays small on a populated drawing: no entities unless asked for,
+/// and asked-for entities come in pages that say what is left.
+#[test]
+fn inspect_drawing_is_compact_and_pages_entities() {
+    let mut s = Server::new(Box::new(Headless::default()));
+    for i in 0..30 {
+        tool(&mut s, "execute", json!({"command": "circle", "params": {"center": [i * 10, 0], "radius": 2}}));
+    }
+    let d = tool(&mut s, "inspect_drawing", json!({}));
+    assert!(d.get("entities").is_none(), "no entities by default");
+    assert_eq!(d["counts"]["Circle"], 30);
+    let page = tool(&mut s, "inspect_drawing", json!({"entities": true, "limit": 10, "offset": 10}));
+    assert_eq!(page["entities"].as_array().map(Vec::len), Some(10));
+    assert_eq!(page["entitiesTotal"], 30);
+    assert_eq!(page["nextOffset"], 20);
+}
+
+/// Guards that a new drawing says which units it has, so an agent that left `metric` out learns
+/// it got inches, and that metric:true gives millimetres.
+#[test]
+fn new_drawing_reports_its_units() {
+    let mut s = Server::new(Box::new(Headless::default()));
+    let metric = tool(&mut s, "new_drawing", json!({"metric": true}));
+    let imperial = tool(&mut s, "new_drawing", json!({"metric": false}));
+    assert_eq!(metric["metric"], true);
+    assert_eq!(imperial["metric"], false);
+    assert_ne!(metric["insunits"], imperial["insunits"], "{metric} {imperial}");
+}
+
+/// The text of the one dimension `find_text` reports with `handle`.
+fn dim_text(s: &mut Server, handle: &Value) -> String {
+    let t = tool(s, "find_text", json!({"dimensions": true}));
+    t["texts"].as_array().into_iter().flatten().find(|v| v["handle"] == *handle).and_then(|v| v["text"].as_str()).unwrap_or_default().to_string()
+}
+
+/// Guards that a chain goes on from the dimension named in `base`, not from whichever dimension
+/// was drawn last (another chain, or another client, may have drawn one in between).
+#[test]
+fn dimcontinue_goes_on_from_the_base_it_is_given() {
+    let mut s = Server::new(Box::new(Headless::default()));
+    tool(&mut s, "new_drawing", json!({"metric": true}));
+    let a = tool(&mut s, "execute", json!({"command": "dimlinear", "params": {"p1": [0, 0], "p2": [1000, 0], "at": [500, -500]}}));
+    // Another dimension in between: vertical, 300 long.
+    tool(&mut s, "execute", json!({"command": "dimlinear", "params": {"p1": [5000, 0], "p2": [5000, 300], "at": [5500, 150]}}));
+    let r = tool(&mut s, "execute", json!({"command": "dimcontinue", "params": {"base": a["handle"], "points": [[2500, 0]]}}));
+    let h = &r["handles"][0];
+    assert!(dim_text(&mut s, h).starts_with("1500"), "continues the first dimension: {}", dim_text(&mut s, h));
+    let r = call(&mut s, 8, "tools/call", json!({"name": "execute", "arguments": {"command": "dimcontinue", "params": {"base": "FFFFFF", "points": [[1, 1]]}}}));
+    assert_eq!(r["result"]["isError"], true, "an unknown base is refused: {r}");
+}
+
+/// Guards that the agent can find texts that print over each other: two dimension texts of a
+/// chain whose short middle segment can't hold its text, and a room label on top of them.
+#[test]
+fn find_text_reports_overlapping_texts() {
+    let mut s = Server::new(Box::new(Headless::default()));
+    tool(&mut s, "new_drawing", json!({"metric": true}));
+    tool(&mut s, "execute", json!({"command": "text", "params": {"at": [0, 0], "height": 250, "text": "SEJOUR"}}));
+    tool(&mut s, "execute", json!({"command": "text", "params": {"at": [5000, 5000], "height": 250, "text": "CUISINE"}}));
+    let t = tool(&mut s, "find_text", json!({"overlaps": true}));
+    assert_eq!(t["overlapCount"], 0, "{t}");
+    assert!(t["texts"][0]["box"].is_array(), "{t}");
+    tool(&mut s, "execute", json!({"command": "text", "params": {"at": [300, 50], "height": 250, "text": "LABEL"}}));
+    let t = tool(&mut s, "find_text", json!({"overlaps": true}));
+    assert_eq!(t["overlapCount"], 1, "{t}");
+}
+
+/// Guards the check on the case met in practice: in a chain at 1:50, a 200 mm segment can't hold
+/// its text, which then prints over its neighbour's; text moved over the line (DIMTMOVE 2) clears it.
+#[test]
+fn a_short_segment_in_a_chain_is_found_and_cleared_by_dimtmove() {
+    let mut s = Server::new(Box::new(Headless::default()));
+    tool(&mut s, "new_drawing", json!({"metric": true}));
+    let style = json!({"name": "PLAN50", "current": true, "DIMTXT": 150, "DIMTSZ": 60, "DIMGAP": 40, "DIMDEC": 0, "DIMTAD": 1});
+    tool(&mut s, "execute", json!({"command": "dimstyle", "params": style}));
+    let a = tool(&mut s, "execute", json!({"command": "dimlinear", "params": {"p1": [0, 0], "p2": [1000, 0], "at": [500, -600]}}));
+    tool(&mut s, "execute", json!({"command": "dimcontinue", "params": {"base": a["handle"], "points": [[1200, 0], [1600, 0]]}}));
+    let t = tool(&mut s, "find_text", json!({"dimensions": true, "overlaps": true}));
+    assert!(t["overlapCount"].as_u64().unwrap_or(0) > 0, "the 200 text runs into the 400 one: {t}");
+    tool(&mut s, "execute", json!({"command": "dimstyle", "params": {"name": "PLAN50", "DIMTMOVE": 2}}));
+    let t = tool(&mut s, "find_text", json!({"dimensions": true, "overlaps": true}));
+    assert_eq!(t["overlapCount"], 0, "{t}");
+}
+
+/// Guards that a text's height changes in place by JSON (no erase and redraw).
+#[test]
+fn text_height_changes_through_properties() {
+    let mut s = Server::new(Box::new(Headless::default()));
+    let h = tool(&mut s, "execute", json!({"command": "text", "params": {"at": [0, 0], "height": 2.5, "text": "A"}}))["handle"].clone();
+    tool(&mut s, "execute", json!({"command": "properties.set", "params": {"handles": [h], "height": 5}}));
+    let t = tool(&mut s, "find_text", json!({}));
+    assert_eq!(t["texts"][0]["height"], 5.0, "{t}");
+}
+
 /// Guards that bad input is reported, not fatal: a refused command and a screenshot without a
 /// UI are `isError` results, and malformed JSON is a parse error (-32700).
 #[test]
@@ -489,4 +629,71 @@ fn a_read_root_alone_still_draws_but_writes_nothing() {
     let _ = call(&mut s, 96, "tools/call", json!({"name": "script", "arguments": {"text": format!("circle 0,0 1\nsave {}\n", out("f.dxf"))}}));
     let written: Vec<_> = std::fs::read_dir(&outside).unwrap().filter_map(Result::ok).map(|e| e.file_name()).collect();
     assert!(written.is_empty(), "nothing is written outside the roots: {written:?}");
+}
+
+
+/// Guards façade hatching from an internal point: windows inside the wall, on its bottom edge,
+/// across its top edge, and framed windows (frame and glass) with style outer stay unhatched,
+/// while the wall itself is hatched.
+#[test]
+fn a_wall_hatch_leaves_its_windows_out() {
+    let rect = |x0: f64, y0: f64, x1: f64, y1: f64| json!({"command": "pline", "params": {"vertices": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], "closed": true}});
+    let cases: Vec<(&str, Vec<Value>, Option<&str>, (f64, f64))> = vec![
+        ("inside", vec![rect(1000.0, 1000.0, 2200.0, 2200.0)], None, (1600.0, 1600.0)),
+        ("on the bottom edge", vec![rect(3000.0, 0.0, 4200.0, 2200.0)], None, (3600.0, 1000.0)),
+        ("across the top edge", vec![rect(6000.0, 2000.0, 7000.0, 3500.0)], None, (6500.0, 2500.0)),
+        ("framed, style outer", vec![rect(1000.0, 1000.0, 2200.0, 2200.0), rect(1100.0, 1100.0, 2100.0, 2100.0)], Some("outer"), (1600.0, 1600.0)),
+        ("framed on the bottom edge", vec![rect(3000.0, 0.0, 4200.0, 2200.0), rect(3100.0, 100.0, 4100.0, 2100.0)], None, (3600.0, 1000.0)),
+    ];
+    for (name, windows, style, glass) in cases {
+        let mut s = Server::new(Box::new(Headless::default()));
+        tool(&mut s, "new_drawing", json!({"metric": true}));
+        tool(&mut s, "execute", rect(0.0, 0.0, 10000.0, 3000.0));
+        for w in windows {
+            tool(&mut s, "execute", w);
+        }
+        let mut p = json!({"points": [[500, 500]], "pattern": "SOLID"});
+        if let Some(st) = style {
+            p["style"] = json!(st);
+        }
+        tool(&mut s, "execute", json!({"command": "hatch", "params": p}));
+        let pm = render_pixels(&mut s, json!({"window": [[0, 0], [10000, 4000]], "width": 1000, "height": 400, "background": "white"}));
+        let px = |x: f64, y: f64| rgb(&pm, (x / 10.0) as u32, ((4000.0 - y) / 10.0) as u32);
+        assert_eq!(px(glass.0, glass.1), (255, 255, 255), "{name}: the window is not hatched");
+        assert_ne!(px(500.0, 2600.0), (255, 255, 255), "{name}: the wall is hatched");
+    }
+}
+
+/// Guards the sheet workflow an agent needs to deliver a plan at a scale, through JSON only: a
+/// layout on A3 landscape with its viewport at 1:100, previewed with render, plotted to PDF; the
+/// reply says what the sheet was set up as and what the file holds (one A3 landscape page that
+/// draws something).
+#[test]
+fn a_plan_is_plotted_on_a3_at_1_100_and_checked() {
+    // The file formats and the plotter, installed as the CLI installs them.
+    cadcraft_engine::cmd::file::set_io(cadcraft_engine::cmd::file::IoHooks {
+        read: |b, name| cadcraft_io::read(b, name).map_err(|e| e.to_string()),
+        write: |d, name| cadcraft_io::write(d, name).map_err(|e| e.to_string()),
+        plot: Some(|d, space, opts| cadcraft_io::plotter::plot(d, space, opts).map_err(|e| e.to_string())),
+    });
+    let dir = TestDir::fresh("cadcraft-mcp-plot");
+    let mut s = Server::new(Box::new(Headless::default()));
+    tool(&mut s, "new_drawing", json!({"metric": true}));
+    tool(&mut s, "execute", json!({"command": "pline", "params": {"vertices": [[0, 0], [15400, 0], [15400, 9600], [0, 9600]], "closed": true}}));
+    tool(&mut s, "execute", json!({"command": "layer.new", "params": {"name": "AIDES"}}));
+    tool(&mut s, "execute", json!({"command": "layer.set", "params": {"name": "AIDES", "plot": false}}));
+    let l = tool(&mut s, "execute", json!({"command": "layout.new", "params": {"name": "A3-PLAN"}}));
+    tool(&mut s, "execute", json!({"command": "pagesetup", "params": {"layout": "A3-PLAN", "paper": "A3", "landscape": true, "plotStyleTable": "monochrome.ctb"}}));
+    tool(&mut s, "execute", json!({"command": "viewport.set", "params": {"handle": l["viewport"], "scale": "1:100", "center": [7700, 4800]}}));
+    let img = tool(&mut s, "render", json!({"layout": "A3-PLAN", "width": 420, "height": 297}));
+    assert_eq!(img["type"], "image", "{img}");
+    let path = dir.0.join("plan.pdf");
+    let r = tool(&mut s, "execute", json!({"command": "plot", "params": {"path": path.to_string_lossy(), "layout": "A3-PLAN"}}));
+    assert_eq!(r["sheet"]["viewports"][0]["scale"], "1:100", "{r}");
+    assert!(r["sheet"]["layersNotPlotted"].as_array().is_some_and(|a| a.contains(&json!("AIDES"))), "{r}");
+    assert_eq!(r["pdf"]["pageCount"], 1, "{r}");
+    let page = &r["pdf"]["pages"][0];
+    assert_eq!(page["landscape"], true, "{r}");
+    assert!((page["widthMm"].as_f64().unwrap_or(0.0) - 420.0).abs() < 1.0, "A3 is 420 mm wide: {r}");
+    assert_eq!(page["drawn"], true, "{r}");
 }

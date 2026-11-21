@@ -233,7 +233,7 @@ const METHODS: &[(&str, &str, &str)] = &[
     ("ui.resize", "{width, height}", "Resize the window."),
     ("ui.focus", "", "Activate the native window."),
     ("ui.screenshot", "{path?}", "PNG of the window (needs a presented frame)."),
-    ("ui.render", "{path?, width?, height?, fit?, window?, background?, plot_style?}", "Headless render of the drawing; replies pngBase64."),
+    ("ui.render", "{path?, width?, height?, fit?, window?, background?, plot_style?, layout?}", "Headless render of the drawing (or the layout named); replies pngBase64."),
     ("app.open", "{path}", "Open a drawing."),
     ("app.save", "{path?}", "Save the drawing (Save As with a path)."),
     ("app.quit", "", "Quit without the unsaved-changes prompt."),
@@ -324,7 +324,10 @@ fn handle_request(app: &mut CadApp, ctx: &egui::Context, req: &ControlRequest) -
             let Some(id) = s("command").or(s("id")) else { return err("missing `command`") };
             let params = p.get("params").cloned().unwrap_or(json!({}));
             let params = if params.is_null() { json!({}) } else { params };
-            wrap(app.run(id, params))
+            // A command that replies nothing gets a summary of what it changed (`effect`).
+            let before = cadcraft_engine::effect::before(&app.session);
+            let r = app.run(id, params);
+            wrap(r.map(|v| cadcraft_engine::effect::or_summary(v, id, before.as_ref(), &app.session)))
         }
         "ui.menu.invoke" => {
             let Some(id) = s("command").or(s("id")) else { return err("missing `command`") };
@@ -518,9 +521,14 @@ fn handle_request(app: &mut CadApp, ctx: &egui::Context, req: &ControlRequest) -
                 plot_style_table: look.plot_style_table.clone(),
                 ..Default::default()
             };
-            let list = cadcraft_render::build(&st.doc, &st.space, &opts);
+            let space = match cadcraft_engine::render_look::render_space(&st.doc, p, &st.space) {
+                Ok(space) => space,
+                Err(e) => return err(e),
+            };
+            let list = cadcraft_render::build(&st.doc, &space, &opts);
             let v = st.view();
-            let fit = p.get("fit").and_then(Value::as_bool).unwrap_or(true);
+            // Another space than the one shown has no current view to keep: fit it.
+            let fit = p.get("fit").and_then(Value::as_bool).unwrap_or(true) || space != st.space;
             let view = match &window {
                 Some(win) => cadcraft_render::raster::View::of_window(win, f("width").map(|x| x as u32), f("height").map(|x| x as u32)),
                 None => render_view(&list.bounds, v.center, v.height, fit, w, h),

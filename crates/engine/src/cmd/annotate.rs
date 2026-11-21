@@ -69,12 +69,12 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("dimcontinue", "Continue", run_continue)
             .menu(&["Dimension", "Continue"])
             .alias(&["dco", "dimcont"])
-            .params("{points: [[x,y]...]} (continues the last linear dimension)")
+            .params("{points: [[x,y]...], base?: handle} (continues the dimension `base`, or else the last linear dimension drawn)")
             .interactive(|s| Ok(Box::new(ChainM::new(s, false)))),
         CommandSpec::new("dimbaseline", "Baseline", run_baseline)
             .menu(&["Dimension", "Baseline"])
             .alias(&["dba", "dimbase"])
-            .params("{points: [[x,y]...]} (baseline from the last linear dimension)")
+            .params("{points: [[x,y]...], base?: handle} (baseline from the dimension `base`, or else the last linear dimension drawn)")
             .interactive(|s| Ok(Box::new(ChainM::new(s, true)))),
         CommandSpec::new("qdim", "Quick Dimension", qdim::run)
             .menu(&["Dimension", "Quick Dimension"])

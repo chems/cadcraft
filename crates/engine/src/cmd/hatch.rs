@@ -247,7 +247,11 @@ pub(crate) fn loops_at(s: &Session, p: Vec2) -> Result<Vec<HatchLoop>> {
                 let pts = Polyline { vertices: vs.clone(), closed: true }.tessellate(tol.max(eb.width() * 1e-3));
                 let inside = pts.iter().all(|q| point_in_polygon(&outer, *q) || outer.iter().any(|o| o.near(*q, tol * 10.0)));
                 let same_as_outer = (cadcraft_geom::shoelace(&pts).abs() - cadcraft_geom::shoelace(&outer).abs()).abs() < tol.max(1e-6) * 1000.0;
-                if inside && !same_as_outer && !point_in_polygon(&pts, p) {
+                // A closed object whose outline runs along the outer loop (a window on the wall's
+                // edge, which the outer loop already goes round) has every vertex on that loop but
+                // its inside outside it: it is no island.
+                let within = cadcraft_geom::region::interior_point(&pts).is_some_and(|q| point_in_polygon(&outer, q));
+                if inside && within && !same_as_outer && !point_in_polygon(&pts, p) {
                     loops.push(HatchLoop { vertices: vs, outer: false, sources: vec![e.handle] });
                 }
             }

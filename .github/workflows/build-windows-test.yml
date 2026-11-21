@@ -1,0 +1,36 @@
+# Test build for this fork only: compiles the app and the CLI on Windows and keeps them as an
+# artifact (not signed, not released). Not meant for the upstream repository.
+name: Build Windows (test)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [mcp-corrections]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+      - name: Build cadcraft and cadcraft-cli
+        run: cargo build --release --locked -p cadcraft -p cadcraft-cli
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/release/cadcraft.exe, target/release/cadcraft-cli.exe dist/
+          Compress-Archive -Path dist/* -DestinationPath cadcraft-dev-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cadcraft-dev-windows-x64
+          path: cadcraft-dev-windows-x64.zip
+          retention-days: 14

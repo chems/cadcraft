@@ -897,6 +897,13 @@ fn run_plot(s: &mut Session, p: &Value, cmd: &str) -> Result<Value> {
     };
     let pages = sheets.as_ref().map_or(1, Vec::len);
     let format = opts.get("output").and_then(Value::as_str).map(str::to_ascii_lowercase).unwrap_or_else(|| "pdf".into());
+    let sheet = sheet_facts(s.doc()?, &space, &opts);
+    let with_sheet = |mut r: Value| {
+        if let Some(o) = r.as_object_mut() {
+            o.insert("sheet".into(), sheet.clone());
+        }
+        r
+    };
     match str_param(p, "path") {
         Some(_path) => {
             #[cfg(not(target_arch = "wasm32"))]
@@ -909,16 +916,64 @@ fn run_plot(s: &mut Session, p: &Value, cmd: &str) -> Result<Value> {
                 crate::atomic_write::write_atomic_making_folders(std::path::Path::new(path), &bytes).map_err(|e| bad(cmd, format!("{path}: {e}")))?;
                 let mut r = json!({ "path": path, "bytes": bytes.len(), "layout": layout, "pages": pages, "format": format });
                 super::file::report_new_folder(s, &mut r, folder);
-                Ok(r)
+                Ok(with_sheet(r))
             }
             #[cfg(target_arch = "wasm32")]
             {
                 super::exchange::deliver_file(cmd, _path, &bytes, super::file::deliver())?;
-                Ok(json!({ "path": _path, "bytes": bytes.len(), "layout": layout, "pages": pages, "format": format }))
+                Ok(with_sheet(json!({ "path": _path, "bytes": bytes.len(), "layout": layout, "pages": pages, "format": format })))
             }
         }
-        None => Ok(json!({ "data": base64_encode(&bytes), "bytes": bytes.len(), "layout": layout, "pages": pages, "format": format })),
+        None => Ok(with_sheet(json!({ "data": base64_encode(&bytes), "bytes": bytes.len(), "layout": layout, "pages": pages, "format": format }))),
     }
+}
+
+/// What a plot of `space` was set up to print, for checking it without opening the file: a
+/// layout's paper, orientation and plot style table (the plot's own options first), the scale of
+/// each of its viewports, and the layers that print nothing (off, frozen or not plotted).
+fn sheet_facts(d: &cadcraft_doc::Drawing, space: &Space, opts: &Value) -> Value {
+    let given = |k: &str| opts.get(k).filter(|v| !v.is_null()).cloned();
+    let not_plotted: Vec<&str> = d.layers.iter().filter(|l| !l.plot || !l.on || l.frozen).map(|l| l.name.as_str()).collect();
+    let mut out = json!({ "layersNotPlotted": not_plotted });
+    match space {
+        Space::Paper(name) => {
+            let Some(l) = d.layout(name) else { return out };
+            let pg = &l.page;
+            let scale_of = |v: &cadcraft_doc::Viewport| {
+                let k = v.view_height / v.height;
+                if k.is_finite() && k > 0.0 { json!(format!("1:{}", (k * 1000.0).round() / 1000.0)) } else { Value::Null }
+            };
+            let viewports: Vec<Value> = l
+                .entities
+                .iter()
+                .filter_map(|e| match &e.kind {
+                    // Viewport 1 is the layout's own paper-space view, not a viewport on the sheet.
+                    EntityKind::Viewport(v) if v.id != 1 => Some(json!({ "handle": e.handle.hex(), "scale": scale_of(v), "on": v.on, "locked": v.locked })),
+                    _ => None,
+                })
+                .collect();
+            if let Some(o) = out.as_object_mut() {
+                o.insert("paper".into(), given("paper").unwrap_or_else(|| json!(pg.paper)));
+                o.insert("paperSize".into(), json!([pg.width_mm, pg.height_mm]));
+                o.insert("landscape".into(), given("landscape").unwrap_or_else(|| json!(pg.landscape)));
+                o.insert("plotStyleTable".into(), given("plotStyleTable").unwrap_or_else(|| json!(pg.plot_style_table)));
+                o.insert("viewports".into(), json!(viewports));
+                if viewports.is_empty() {
+                    o.insert("warning".into(), json!("the layout has no viewport: nothing of model space is plotted"));
+                }
+            }
+        }
+        Space::Model => {
+            if let Some(o) = out.as_object_mut() {
+                o.insert("plotArea".into(), given("plotArea").unwrap_or_else(|| json!("extents")));
+                o.insert("scale".into(), given("scale").unwrap_or_else(|| json!("fit")));
+                if let Some(paper) = given("paper") {
+                    o.insert("paper".into(), paper);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The model-space rectangle a plot of `plotArea` covers: `extents` (default) plots everything,

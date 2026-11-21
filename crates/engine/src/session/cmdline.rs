@@ -192,13 +192,17 @@ impl Session {
     }
 
     fn script_lines(&mut self, text: &str) -> Result<()> {
-        for line in text.lines() {
+        for (n, line) in text.lines().enumerate() {
             // Trailing spaces are inputs (Enter); other trailing whitespace (`\r`) is not.
             let line = line.trim_end_matches(|c: char| c.is_whitespace() && c != ' ');
             if line.trim_start().starts_with(';') {
                 continue;
             }
-            self.input_line(line, true)?;
+            // The script stops at a failing line; say which one, and that the ones before it ran.
+            self.input_line(line, true).map_err(|e| {
+                let ran = if n == 0 { "nothing ran".to_string() } else { format!("lines 1-{n} ran") };
+                EngineError::Other(format!("script line {} `{}`: {e} ({ran})", n + 1, line.trim()))
+            })?;
         }
         Ok(())
     }

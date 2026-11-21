@@ -10,32 +10,34 @@ pub fn tool_definitions(has_ui: bool) -> Value {
     let mut tools = vec![
         json!({"name": "command_line", "description": "Type one line at the CADCraft command line, exactly as a user would at an AutoCAD-style prompt. Starts commands by name or alias (LINE, L, CIRCLE, C, PLINE, RECTANG, MOVE, TRIM, OFFSET, ZOOM…) and answers the active prompt: points `x,y`, relative `@dx,dy`, polar `@dist<angle`, distances, keywords (e.g. `c` for Close), empty text = Enter. Spaces act as Enter, so `circle 0,0 5` works in one call. Returns the new prompt and command-line output, and `error` when the line was refused.",
             "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}),
-        json!({"name": "script", "description": "Run a multi-line script (like an AutoCAD .scr file): one or more inputs per line, blank line = Enter.",
-            "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}),
-        json!({"name": "execute", "description": "Run any command with JSON parameters (no prompts or dialogs). Use list_commands to find ids and parameter docs. Examples: line {points:[[0,0],[10,0]]}, circle {center:[0,0], radius:5}, layer.new {name:\"Walls\", color:\"red\", current:true}, move {handles:[\"10A\"], delta:[5,0]}, zoom {mode:\"extents\"}.",
+        json!({"name": "script", "description": "Run a multi-line script (like an AutoCAD .scr file): one or more inputs per line, blank line = Enter. A failing line stops the script; the error names the line, and the lines before it have run. A command still waiting for input at the end (LINE without its closing blank line) is finished with Enter by default (`finish`: \"enter\"), cancelled (\"cancel\") or left running (\"keep\"); the reply says which in `finished`, and warns in `warning` if a command is still running.",
+            "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}, "finish": {"type": "string", "description": "\"enter\" (default), \"cancel\" or \"keep\""}}, "required": ["text"]}}),
+        json!({"name": "execute", "description": "Run any command with JSON parameters (no prompts or dialogs). Use list_commands to find ids and parameter docs. A command that replies nothing of its own replies what it changed: {ok, command, changed, createdCount, created (handles), modified, erased, layersAdded?, layersChanged?, currentLayer, view}. Examples: line {points:[[0,0],[10,0]]}, circle {center:[0,0], radius:5}, layer.new {name:\"Walls\", color:\"red\", current:true}, move {handles:[\"10A\"], delta:[5,0]}, zoom {mode:\"extents\"}.",
             "inputSchema": {"type": "object", "properties": {"command": {"type": "string"}, "params": {"type": "object"}}, "required": ["command"]}}),
         json!({"name": "list_commands", "description": "List commands with ids, labels, menu paths, aliases and parameter docs. Optional filter: a substring of the command id, label or an alias.",
             "inputSchema": {"type": "object", "properties": {"filter": {"type": "string"}}}}),
-        json!({"name": "inspect_drawing", "description": "Summary of the active drawing: entity counts, extents, layers, styles, blocks, layouts, selection, undo history and (optionally) entities with handles and geometry.",
-            "inputSchema": {"type": "object", "properties": {"entities": {"type": "boolean"}, "limit": {"type": "integer"}}}}),
+        json!({"name": "inspect_drawing", "description": "Summary of the active drawing: entity counts (by type and by layer), extents, layers, styles, blocks, layouts, selection and undo history. Entities with handles and geometry only with entities:true, a page of `limit` (default 200) from `offset`; `entitiesTotal` and `nextOffset` tell what is left. For large drawings prefer query_entities with a layer, type or window.",
+            "inputSchema": {"type": "object", "properties": {"entities": {"type": "boolean"}, "limit": {"type": "integer", "minimum": 0}, "offset": {"type": "integer", "minimum": 0}}}}),
         json!({"name": "query_entities", "description": "Entities filtered by type (Line, Circle, Polyline…), layer, current selection (selected:true; active space only) and/or a window [[x0,y0],[x1,y1]] (objects whose geometry is inside or crosses it; crossing:false = entirely inside). Returns count (all matches), returned (this page) and entities; page with offset and limit (default 500).",
             "inputSchema": {"type": "object", "properties": {"type": {"type": "string"}, "layer": {"type": "string"}, "selected": {"type": "boolean"},
                 "window": {"type": "array", "items": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}, "minItems": 2, "maxItems": 2},
                 "crossing": {"type": "boolean"}, "limit": {"type": "integer", "minimum": 0}, "offset": {"type": "integer", "minimum": 0}}}}),
-        json!({"name": "render", "description": "Render the active drawing to a PNG and return it as an image content block (content[0].type is \"image\", not text): fitted to the extents by default, or just the area `window` [[x0,y0],[x1,y1]] (drawing units), e.g. one sheet or one room of a large drawing. With a window and no size the image is 1600 px wide with the window's shape. `background`: \"dark\" (the canvas; the default without a plot style), \"white\" (the default with one, as a plot prints on paper), \"paper\" or \"#rrggbb\"; colour 7 is drawn white on a dark background and black on a light one, as on a plot. `plot_style`: a plot style table, e.g. \"monochrome.ctb\" (every colour black, as most plots) or \"grayscale.ctb\", which make light colours readable on white; \"none\" (or \"\") draws every object with its own properties, also in a layout that shows its own plot styles (without `plot_style` such a layout draws with its table, as on screen). An unknown background or plot style is refused.",
+        json!({"name": "render", "description": "Render the active drawing to a PNG and return it as an image content block (content[0].type is \"image\", not text): fitted to the extents by default, or just the area `window` [[x0,y0],[x1,y1]] (drawing units), e.g. one sheet or one room of a large drawing. With a window and no size the image is 1600 px wide with the window's shape. `background`: \"dark\" (the canvas; the default without a plot style), \"white\" (the default with one, as a plot prints on paper), \"paper\" or \"#rrggbb\"; colour 7 is drawn white on a dark background and black on a light one, as on a plot. `plot_style`: a plot style table, e.g. \"monochrome.ctb\" (every colour black, as most plots) or \"grayscale.ctb\", which make light colours readable on white; \"none\" (or \"\") draws every object with its own properties, also in a layout that shows its own plot styles (without `plot_style` such a layout draws with its table, as on screen). An unknown background or plot style is refused. `layout`: draw that layout (the sheet as it plots, viewports at their scales) or \"Model\" instead of the space shown, to look at a page before plotting it.",
             "inputSchema": {"type": "object", "properties": {"width": {"type": "integer", "minimum": 16}, "height": {"type": "integer", "minimum": 16}, "fit": {"type": "boolean"},
                 "window": {"type": "array", "items": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}, "minItems": 2, "maxItems": 2},
                 "background": {"type": "string", "description": "\"dark\" (default without plot_style), \"white\" (default with one), \"paper\" or \"#rrggbb\""},
                 "plot_style": {"type": "string", "description": "a plot style table: monochrome.ctb, grayscale.ctb, default.ctb, default.stb, monochrome.stb, or one the drawing holds; \"none\" or \"\" for the objects' own properties"},
+                "layout": {"type": "string", "description": "a layout name or \"Model\" (default: the space shown)"},
                 "path": {"type": "string"}}}}),
-        json!({"name": "find_text", "description": "Read the drawing's texts: TEXT, MTEXT (formatting removed), block attributes and multileaders, each with its text, insertion point `at`, height, rotation, style, layer and handle. Filter by `contains` (any case; `query` is the same filter), `layer` and/or `window` [[x0,y0],[x1,y1]] around the insertion points; page with offset and limit (default 200). Use it to find room names, sheet titles and notes without reading all the geometry.",
+        json!({"name": "find_text", "description": "Read the drawing's texts: TEXT, MTEXT (formatting removed), block attributes and multileaders, each with its text, insertion point `at`, height, rotation, style, layer and handle. Filter by `contains` (any case; `query` is the same filter), `layer` and/or `window` [[x0,y0],[x1,y1]] around the insertion points; page with offset and limit (default 200). Use it to find room names, sheet titles and notes without reading all the geometry. Each text has its `box` [[x0,y0],[x1,y1]] where measured; dimensions:true adds the dimensions' texts; overlaps:true lists the pairs of texts that print over each other (`overlaps`, `overlapCount`), to check labels and dimension chains before plotting.",
             "inputSchema": {"type": "object", "properties": {"contains": {"type": "string"}, "query": {"type": "string"}, "layer": {"type": "string"},
+                "dimensions": {"type": "boolean"}, "overlaps": {"type": "boolean"},
                 "window": {"type": "array", "items": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}, "minItems": 2, "maxItems": 2},
                 "limit": {"type": "integer", "minimum": 0}, "offset": {"type": "integer", "minimum": 0}}}}),
-        json!({"name": "new_drawing", "description": "Create a new drawing (imperial by default, or metric).",
+        json!({"name": "new_drawing", "description": "Create a new drawing: metric with metric:true, imperial with metric:false, otherwise as the MEASUREINIT preference (imperial in a fresh headless session). The reply gives `metric` and `insunits` (4 = millimetres, 1 = inches): pass `metric` explicitly when the units matter.",
             "inputSchema": {"type": "object", "properties": {"metric": {"type": "boolean"}}}}),
         json!({"name": "open", "description": "Open a DXF or DWG file.", "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}),
-        json!({"name": "save", "description": "Save the drawing (DXF or DWG by extension). A .svg, .png or .pdf path exports instead: the drawing keeps its name and unsaved changes.", "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}}}),
+        json!({"name": "save", "description": "Save the drawing (DXF or DWG by extension). A .svg, .png or .pdf path exports instead: the drawing keeps its name and unsaved changes. A PDF is read back: `pdf` gives its pages with their size in mm, orientation and whether each draws anything. For a sheet at a scale, set up a layout (layout.new, pagesetup, viewport.set) and use execute plot {path, layout}; its reply has the same `pdf` check and a `sheet` summary (paper, viewport scales, layers not plotted).", "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}}}),
         json!({"name": "cancel", "description": "Press Escape: cancel the running command (or clear the selection).", "inputSchema": {"type": "object", "properties": {}}}),
     ];
     if has_ui {
@@ -104,6 +106,76 @@ fn check_args(name: &str, args: &Value) -> Result<Value, String> {
     Ok(a)
 }
 
+/// A reply that wrote a PDF (`save` to a .pdf path, `plot`), with what the file holds read back
+/// (`pdf`: pages, paper size and orientation of each, whether each draws anything).
+fn with_pdf_report(mut r: Value) -> Value {
+    let is_pdf = |p: &str| std::path::Path::new(p).extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
+    let report = match (r.get("path").and_then(Value::as_str), r.get("data").and_then(Value::as_str)) {
+        (Some(path), _) if is_pdf(path) && r.get("format").and_then(Value::as_str).is_none_or(|f| f == "pdf") => Some(crate::pdf_check::report_file(path)),
+        (None, Some(data)) if r.get("format").and_then(Value::as_str) == Some("pdf") => {
+            cadcraft_engine::cmd::file::base64_decode(data).map(|bytes| crate::pdf_check::report(&bytes))
+        }
+        _ => None,
+    };
+    if let (Some(report), Some(o)) = (report, r.as_object_mut()) {
+        o.insert("pdf".into(), report);
+    }
+    r
+}
+
+/// The command still running in a command-line state reply (`running`), if any.
+fn running(state: &Value) -> Option<String> {
+    state.get("running").and_then(Value::as_str).map(str::to_string)
+}
+
+/// At most this many presses of Enter finish a command left running by a script.
+const FINISH_PRESSES: usize = 3;
+
+/// After a script: finish a command it left waiting for input, as `finish` says ("enter", "cancel"
+/// or "keep"), and say so in the reply, so the next call isn't read as that command's input.
+fn finish_script(b: &mut dyn Backend, mut reply: Value, finish: &str) -> Result<Value, String> {
+    let key = match finish {
+        "enter" => "enter",
+        "cancel" => "escape",
+        "keep" => return Ok(warn_running(reply)),
+        other => return Err(format!("`finish` must be \"enter\", \"cancel\" or \"keep\", not `{other}`")),
+    };
+    let Some(command) = running(&reply["state"]) else { return Ok(reply) };
+    let mut state = reply["state"].clone();
+    let mut output: Vec<Value> = Vec::new();
+    for _ in 0..FINISH_PRESSES {
+        state = b.call("cmdline.key", json!({"key": key}))?;
+        output.extend(state.get("output").and_then(Value::as_array).cloned().unwrap_or_default());
+        if running(&state).is_none() || key == "escape" {
+            break;
+        }
+    }
+    if let Some(o) = state.as_object_mut() {
+        o.remove("output");
+    }
+    if let Some(o) = reply.as_object_mut() {
+        if let Some(out) = o.get_mut("output").and_then(Value::as_array_mut) {
+            out.extend(output);
+        }
+        o.insert("finished".into(), json!({"command": command, "by": finish}));
+        o.insert("state".into(), state);
+    }
+    Ok(warn_running(reply))
+}
+
+/// A script reply with a `warning` when a command is still waiting for input.
+fn warn_running(mut reply: Value) -> Value {
+    if let Some(command) = running(&reply["state"])
+        && let Some(o) = reply.as_object_mut()
+    {
+        o.insert(
+            "warning".into(),
+            json!(format!("`{command}` is still waiting for input: the next command_line text answers its prompt. Send an empty command_line (Enter) to finish it or call cancel")),
+        );
+    }
+    reply
+}
+
 /// Whether a command-catalog entry's id, label or one of its aliases contains `f` (lower case).
 fn command_matches(c: &Value, f: &str) -> bool {
     let has = |s: &str| s.to_ascii_lowercase().contains(f);
@@ -117,11 +189,16 @@ pub fn call_tool(b: &mut dyn Backend, name: &str, args: &Value) -> Result<Value,
     let a = check_args(name, args)?;
     let r = match name {
         "command_line" => b.call("cmdline.input", a),
-        "script" => b.call("cmdline.script", a),
-        "execute" => b.call(
-            "engine.execute",
-            json!({"command": a.get("command").cloned().unwrap_or(Value::Null), "params": a.get("params").cloned().unwrap_or(json!({}))}),
-        ),
+        "script" => {
+            let text = json!({"text": a.get("text").cloned().unwrap_or(Value::Null)});
+            b.call("cmdline.script", text).and_then(|r| finish_script(b, r, a.get("finish").and_then(Value::as_str).unwrap_or("enter")))
+        }
+        "execute" => b
+            .call(
+                "engine.execute",
+                json!({"command": a.get("command").cloned().unwrap_or(Value::Null), "params": a.get("params").cloned().unwrap_or(json!({}))}),
+            )
+            .map(|r| if a.get("command").and_then(Value::as_str).is_some_and(|c| c.eq_ignore_ascii_case("plot")) { with_pdf_report(r) } else { r }),
         "list_commands" => b.call("engine.commands", json!({})).map(|v| {
             let f = a.get("filter").and_then(Value::as_str).map(str::to_ascii_lowercase);
             match (v, f) {
@@ -129,12 +206,19 @@ pub fn call_tool(b: &mut dyn Backend, name: &str, args: &Value) -> Result<Value,
                 (v, _) => v,
             }
         }),
-        "inspect_drawing" => b.call("drawing.inspect", a),
+        // Compact by default: entities only when asked for, so a large drawing fits the reply.
+        "inspect_drawing" => {
+            let mut a = a;
+            if a.get("entities").is_none_or(Value::is_null) {
+                a["entities"] = json!(false);
+            }
+            b.call("drawing.inspect", a)
+        }
         "query_entities" => b.call("engine.execute", json!({"command": "entities", "params": a})),
         "find_text" => b.call("engine.execute", json!({"command": "texts", "params": a})),
         "new_drawing" => b.call("engine.execute", json!({"command": "new", "params": a})),
         "open" => b.call("app.open", a),
-        "save" => b.call("app.save", a),
+        "save" => b.call("app.save", a).map(with_pdf_report),
         "cancel" => b.call("cmdline.key", json!({"key": "escape"})),
         "screenshot" => b.call("ui.screenshot", a),
         "ui_inspect" => b.call("ui.inspect", json!({})),

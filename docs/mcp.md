@@ -15,8 +15,10 @@ cadcraft-cli mcp --connect 127.0.0.1:7979
 
 An MCP client usually starts its servers when it starts, often before the app is open. With
 `--lazy` the bridge starts anyway and reaches the app at the first tool call; until the app answers,
-each call fails with a message saying how to open it. `--launch` also opens CADCraft (macOS) with
-that control port at a call that finds nothing, and waits for it:
+each call fails with a message saying how to open it. `--launch` also opens CADCraft with that
+control port at a call that finds nothing, and waits for it (up to 30 s): on macOS the installed app
+(`open -a CADCraft`), on Windows and Linux the `cadcraft` executable installed beside `cadcraft-cli`,
+started without the server's standard streams so it stays open when the client restarts the server:
 
 ```json
 { "mcpServers": { "cadcraft": { "command": "cadcraft-cli", "args": ["mcp", "--connect", "127.0.0.1:7979", "--launch"] } } }
@@ -108,19 +110,19 @@ sandbox as well if other programs can change these folders.
 | Tool | What it does |
 |---|---|
 | `command_line {text}` | Type at the command line exactly like a person: `line 0,0 @10,0 @0,5 c`, `circle 5,2 1`, `offset 0.5`, `zoom e`. Spaces act as Enter; empty text is Enter. Returns the new prompt, keywords and output. |
-| `script {text}` | A multi-line script (like `.scr` files). |
-| `execute {command, params}` | Any command with JSON parameters, never a dialog. `list_commands` shows ids and parameter docs. |
+| `script {text, finish?}` | A multi-line script (like `.scr` files). A failing line stops it: the error names the line (`script line 3 \`...\`: …`) and says the lines before it ran. A command still waiting for input at the end (a `line` without its closing blank line) is finished with Enter (`finish: "enter"`, the default), cancelled (`"cancel"`) or left running (`"keep"`); `finished` says what was done and `warning` is set while a command is still running, so the next call is not read as its input. A command that only has a JSON form, typed without its parameters (`clayer`), asks for the required ones in turn, so `clayer A-WALL` works in a script; `layer.current {"name": "A-WALL"}` passes them as JSON. |
+| `execute {command, params}` | Any command with JSON parameters, never a dialog. `list_commands` shows ids and parameter docs. A command that replies nothing of its own (`layer.new`, `layer.current`, `zoom`…) replies what it changed instead of `null`: `{ok, command, changed, createdCount, created, modified, erased, layersAdded?, layersChanged?, currentLayer, view}` (`created` lists up to 50 handles). |
 | `list_commands {filter?}` | The command catalog; `filter` matches part of a command's id, label or an alias. |
-| `inspect_drawing {entities?, limit?}` | Counts, extents, layers, styles, blocks, layouts, selection, undo history and entities. |
+| `inspect_drawing {entities?, limit?, offset?}` | Counts by type and by layer (`layerCounts`), extents, layers, styles, blocks, layouts, selection and undo history. Entities only with `entities: true`, a page of `limit` (default 200) from `offset`, with `entitiesTotal` and `nextOffset` while more are left, so a large drawing doesn't overflow the client's reply limit. |
 | `query_entities {type?, layer?, window?, crossing?, limit?, offset?}` | Filtered entities with handles and geometry. `window` `[[x0,y0],[x1,y1]]` finds objects whose geometry is inside it or crosses it (`crossing: false`: entirely inside). `count` is every match, `returned` the page (`offset`, `limit`, default 500). |
 | `execute {"command": "shapes", "params": {type?, layer?, window?, crossing?, limit?, offset?, tolerance?}}` | Facts about the closed shapes — closed polylines, circles, full ellipses, closed splines: perimeter, area, centroid, winding, the first self-intersection and coincident vertices, exact with arcs and bulges. Other matches are counted under `skipped` with the reason. `selfCheck` says what was found, analysed and skipped, the caps hit with their values (`limit`, `crossingSegments`) and implausible values (perimeter past 10× the bounding-box diagonal, area larger than the drawing extents, each past a 1e-9 relative tolerance for rounding; with no visible objects there are no extents, so no area bound applies). |
 | `execute {"command": "shapes", "params": {type?, layer?, window?, crossing?, limit?, offset?, tolerance?}}` | Facts about the closed shapes — closed polylines, circles, full ellipses, closed splines: perimeter, area, centroid, winding, the first self-intersection and coincident vertices, exact with arcs and bulges. Other matches are counted under `skipped` with the reason. |
 | `execute {"command": "usage", "params": {type?, limit?, offset?}}` | Read-only cross-reference of the layers, blocks, text styles and linetypes: for each, the objects in model space and layouts that use it, the objects in block definitions that use it, whether it is used only inside block definitions, and whether it is empty or unused. `summary` counts each kind and `unused` lists what PURGE would offer, in table order. One scan reads at most 5,000,000 objects; a larger drawing sets `incomplete: true` with an `incompleteReason`, because counts, statuses and summaries then omit the objects past the limit. |
 | `execute {"command": "loops", "params": {tolerance?, maxPairs?, limit?, offset?}}` | Implied closed loops from loose LINE and ARC chains: each closed loop with its member handles, perimeter, area and winding, exact with arcs; each open chain with the endpoint gap, its location (`at`, `ends`) and length; and branch junctions (three or more ends meeting), reported but not resolved. `tolerance` defaults to 1e-9 × the extents diagonal; the quadratic endpoint pairing stops at `maxPairs` (default 1,000,000) and reports `capped` with `pairTestsNeeded` instead of guessing from a partial pairing. |
 | `query_entities {type?, layer?, selected?, window?, crossing?, limit?, offset?}` | Filtered entities with handles and geometry. `selected: true` restricts results to the current selection in the active space; an empty selection returns no entities. Omitted/false queries all entities in that space. Filters combine before paging. `window` `[[x0,y0],[x1,y1]]` finds objects whose geometry is inside it or crosses it (`crossing: false`: entirely inside). `count` is every match, `returned` the page (`offset`, `limit`, default 500). |
-| `render {width?, height?, fit?, window?, background?, plot_style?}` | A PNG image of the drawing, or of just the area `window` `[[x0,y0],[x1,y1]]` (one sheet or room of a large drawing; 1600 px wide with the window's shape unless sized). `background`: `"dark"` (the canvas; the default without a plot style), `"white"` (the default with one, as a plot prints on paper), `"paper"` or `"#rrggbb"`; colour 7 is drawn white on a dark background and black on a light one, as on a plot. `plot_style`: a plot style table, e.g. `monochrome.ctb` (every colour black) or `grayscale.ctb`; `"none"` (or `""`) draws every object with its own properties, also in a layout that shows its own plot styles (without `plot_style` such a layout draws with its table, as on screen). An unknown value is refused. The result is an image content block (`content[0].type` is `"image"`), not text. |
-| `find_text {contains?, query?, layer?, window?, limit?, offset?}` | The readable texts — TEXT, MTEXT without formatting codes, block attributes, multileaders — with text, insertion point, height, rotation, style, layer and handle; filtered by content (`contains`, or `query` as an alias; any case), layer and a window around the insertion points. Read-only (the `texts` command). |
-| `new_drawing {metric?}`, `open {path}`, `save {path?}`, `cancel` | Files and Escape. `save` to a `.svg`, `.png` or `.pdf` path exports: the drawing keeps its name and unsaved changes. |
+| `render {width?, height?, fit?, window?, background?, plot_style?}` | A PNG image of the drawing, or of just the area `window` `[[x0,y0],[x1,y1]]` (one sheet or room of a large drawing; 1600 px wide with the window's shape unless sized). `background`: `"dark"` (the canvas; the default without a plot style), `"white"` (the default with one, as a plot prints on paper), `"paper"` or `"#rrggbb"`; colour 7 is drawn white on a dark background and black on a light one, as on a plot. `plot_style`: a plot style table, e.g. `monochrome.ctb` (every colour black) or `grayscale.ctb`; `"none"` (or `""`) draws every object with its own properties, also in a layout that shows its own plot styles (without `plot_style` such a layout draws with its table, as on screen). An unknown value is refused. `layout` draws that layout (the sheet as it plots, its viewports at their scales) or `"Model"` instead of the space shown, to look at a page before plotting it. The result is an image content block (`content[0].type` is `"image"`), not text. |
+| `find_text {contains?, query?, layer?, window?, dimensions?, overlaps?, limit?, offset?}` | The readable texts — TEXT, MTEXT without formatting codes, block attributes, multileaders, and with `dimensions: true` the dimensions' texts — with text, insertion point, height, rotation, style, layer, handle and the `box` the text covers; filtered by content (`contains`, or `query` as an alias; any case), layer and a window around the insertion points. `overlaps: true` lists the pairs of texts that print over each other (`overlaps`, `overlapCount`), for example a short segment's dimension text running into its neighbour's: style the dimensions with DIMTMOVE 1 or 2 (`dimstyle`), or move one text with `dimtedit {handles, at}`. Read-only (the `texts` command). |
+| `new_drawing {metric?}`, `open {path}`, `save {path?}`, `cancel` | Files and Escape. `new_drawing` without `metric` follows the MEASUREINIT preference (imperial in a fresh headless session); its reply gives `metric` and `insunits`. `save` to a `.svg`, `.png` or `.pdf` path exports: the drawing keeps its name and unsaved changes. A PDF written by `save` or by `execute plot {path}` is read back: `pdf` gives `pageCount` and each page's `widthMm`, `heightMm`, `landscape` and whether it `drawn` anything (with a `warning` for blank pages). `plot` also replies a `sheet` summary: a layout's paper, orientation and plot style table, the `scale` of each of its viewports (`"1:100"`), and `layersNotPlotted`. |
 | `screenshot`, `ui_inspect`, `ui_click {x, y}` | Only when connected to the app. |
 
 Resources: `cadcraft://drawing` (inspect JSON) and `cadcraft://commands` (catalog).
@@ -129,6 +131,21 @@ Arguments are checked against each tool's input schema. An unknown tool, `argume
 object, a missing required argument or one of the wrong type is a JSON-RPC error `-32602` (invalid
 params), so `command_line {}` never presses Enter by accident. A tool that runs and fails (a bad
 point, an unknown command) returns a result with `isError: true` and the message.
+
+Calls are answered one at a time, in the order they arrive on stdin. A client that sends several
+tool calls at once decides that order, which need not be the order the agent wrote them in: send a
+call that later ones depend on (changing the current layer before drawing on it) on its own, and
+wait for its reply, or pass the layer explicitly.
+
+## A sheet at a scale
+
+A plan delivered at 1:100 on A3, through JSON only:
+
+1. `execute {"command": "layout.new", "params": {"name": "A3-PLAN"}}` — replies the layout's `viewport` handle.
+2. `execute {"command": "pagesetup", "params": {"layout": "A3-PLAN", "paper": "A3", "landscape": true, "plotStyleTable": "monochrome.ctb"}}`
+3. `execute {"command": "viewport.set", "params": {"handle": "<viewport>", "scale": "1:100", "center": [7700, 4800]}}`
+4. `render {"layout": "A3-PLAN"}` — look at the sheet.
+5. `execute {"command": "plot", "params": {"path": "plan.pdf", "layout": "A3-PLAN"}}` — check `sheet` and `pdf` in the reply.
 
 ## A typical session
 

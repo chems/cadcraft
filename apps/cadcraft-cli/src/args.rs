@@ -273,7 +273,8 @@ pub(crate) struct McpArgs {
     #[arg(long, requires = "connect")]
     pub(crate) lazy: bool,
     /// Like --lazy, and a call that finds nothing at HOST:PORT opens the app with that control
-    /// port first (macOS)
+    /// port first (macOS: the installed app; Windows and Linux: the `cadcraft` executable beside
+    /// this one)
     #[arg(long, requires = "connect")]
     pub(crate) launch: bool,
     /// The only folder the agent's commands may read from; reads are also allowed under the write

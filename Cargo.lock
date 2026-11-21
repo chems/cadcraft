@@ -802,6 +802,7 @@ dependencies = [
  "clap",
  "craft-jsonrpc",
  "craft-mcp",
+ "craft-pdf",
  "getrandom 0.4.3",
  "libc",
  "log",

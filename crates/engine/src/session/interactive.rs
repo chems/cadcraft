@@ -133,7 +133,20 @@ impl Session {
                 Ok(())
             }
             None => {
-                let r = self.execute(spec.id, &Value::Null)?;
+                let r = match self.execute(spec.id, &Value::Null) {
+                    // A JSON-only command missing its required parameters asks for them (CLAYER
+                    // asks for the layer name), so it works typed and in scripts too.
+                    Err(EngineError::BadParams { .. }) if !nested && !cmd::machines::required_params(spec.params).is_empty() => {
+                        let keys = cmd::machines::required_params(spec.params);
+                        let machine = guard::Guarded::wrap(Box::new(cmd::machines::ParamsRun::new(spec.id, keys)));
+                        let st = self.state()?;
+                        let (before, selection_before) = (st.doc.clone(), st.selection.clone());
+                        self.running = Some(Running { id: spec.id.to_string(), machine, before, selection_before });
+                        self.pending_window = None;
+                        return Ok(());
+                    }
+                    r => r?,
+                };
                 if let Some(s) = r.as_str() {
                     self.echo(s.to_string());
                 } else if !r.is_null()

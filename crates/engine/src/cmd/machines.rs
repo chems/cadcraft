@@ -217,6 +217,99 @@ pub fn number(t: &str) -> Option<f64> {
     crate::units::parse_distance(t)
 }
 
+/// The parameters a command's params doc (`{name, color?, …}`) marks as required: the top-level
+/// names without a `?`. Empty when the doc isn't a plain list of names.
+pub fn required_params(doc: &str) -> Vec<String> {
+    let Some(body) = doc.trim_start().strip_prefix('{') else { return Vec::new() };
+    let mut depth = 0i32;
+    let mut end = None;
+    for (i, c) in body.char_indices() {
+        match c {
+            '{' | '[' | '(' => depth += 1,
+            '}' | ']' | ')' if depth == 0 => {
+                end = Some(i);
+                break;
+            }
+            '}' | ']' | ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    let Some(end) = end else { return Vec::new() };
+    let mut out = Vec::new();
+    let (mut depth, mut start) = (0i32, 0usize);
+    let inner = &body[..end];
+    let mut fields = Vec::new();
+    for (i, c) in inner.char_indices() {
+        match c {
+            '{' | '[' | '(' => depth += 1,
+            '}' | ']' | ')' => depth -= 1,
+            ',' if depth == 0 => {
+                fields.push(&inner[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    fields.push(&inner[start..]);
+    for f in fields {
+        let f = f.trim_start();
+        let name: String = f.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+        if !name.is_empty() && !f[name.len()..].starts_with('?') {
+            out.push(name);
+        }
+    }
+    out
+}
+
+/// A command that only has a JSON form, typed at the command line or in a script without its
+/// required parameters: ask for each in turn ("Enter name"), then run it with them. A typed value
+/// that reads as a JSON number, boolean, array or object is passed as one; anything else as text.
+pub struct ParamsRun {
+    id: &'static str,
+    keys: Vec<String>,
+    got: serde_json::Map<String, Value>,
+}
+
+impl ParamsRun {
+    pub fn new(id: &'static str, keys: Vec<String>) -> Self {
+        ParamsRun { id, keys, got: serde_json::Map::new() }
+    }
+}
+
+impl Interactive for ParamsRun {
+    fn name(&self) -> &'static str {
+        self.id
+    }
+    fn prompt(&self, _s: &Session) -> Prompt {
+        let key = self.keys.get(self.got.len()).map_or("value", String::as_str);
+        Prompt::new(format!("Enter {key}"), Accept::TEXT)
+    }
+    fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
+        let text = match i {
+            Input::Text(t) | Input::Keyword(t) => t,
+            Input::Cancel | Input::Enter => return Ok(Step::Cancel),
+            _ => return Ok(Step::Continue),
+        };
+        let Some(key) = self.keys.get(self.got.len()).cloned() else { return Ok(Step::Done) };
+        let t = text.trim();
+        let v = match serde_json::from_str::<Value>(t) {
+            Ok(v) if !v.is_string() && !v.is_null() => v,
+            _ => Value::String(t.to_string()),
+        };
+        self.got.insert(key, v);
+        if self.got.len() < self.keys.len() {
+            return Ok(Step::Continue);
+        }
+        let spec = super::find_command(self.id).ok_or_else(|| EngineError::UnknownCommand(self.id.into()))?;
+        // Call the command body directly: the running command records the single undo step.
+        let r = (spec.run)(s, &Value::Object(std::mem::take(&mut self.got)))?;
+        if let Some(m) = r.as_str().or_else(|| r.get("message").and_then(Value::as_str)) {
+            s.echo(m.to_string());
+        }
+        Ok(Step::Done)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use cadcraft_doc::{EntityKind, Handle};

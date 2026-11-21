@@ -76,6 +76,26 @@ fn split_pair(segs: &[(Vec2, Vec2)], splits: &mut [Vec<f64>], i: usize, j: usize
         if let Some(v) = splits.get_mut(j) {
             v.push(lj.param_of(x).clamp(0.0, 1.0));
         }
+        return;
+    }
+    // Parallel segments don't cross, but collinear ones that overlap (a window drawn on a wall's
+    // edge) must each be split where the other ends, so the shared stretch becomes one edge of
+    // the graph and the faces on both sides of it are found.
+    for (a, b, k) in [(si, sj, i), (sj, si, j)] {
+        let d = a.1 - a.0;
+        let len2 = d.len2();
+        if !(len2 > 0.0 && len2.is_finite()) {
+            continue;
+        }
+        let near = 1e-9 * len2.sqrt().max((b.1 - b.0).len()).max(1.0);
+        for q in [b.0, b.1] {
+            let t = (q - a.0).dot(d) / len2;
+            if t > 0.0 && t < 1.0 && (a.0 + d * t).dist(q) <= near
+                && let Some(v) = splits.get_mut(k)
+            {
+                v.push(t);
+            }
+        }
     }
 }
 
@@ -944,6 +964,19 @@ mod tests {
         ];
         let l = enclosing_loop(&polys, Vec2::new(3.0, 3.0), 1e-9).unwrap();
         assert!((shoelace(&l) - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_square_on_the_edge_of_another_is_cut_out_of_it() {
+        // A window whose sill lies on the wall's bottom edge: the face around a point in the
+        // wall goes round the window, so the window isn't part of it.
+        let polys = vec![
+            vec![Vec2::new(0.0, 0.0), Vec2::new(100.0, 0.0), Vec2::new(100.0, 30.0), Vec2::new(0.0, 30.0), Vec2::new(0.0, 0.0)],
+            vec![Vec2::new(30.0, 0.0), Vec2::new(42.0, 0.0), Vec2::new(42.0, 22.0), Vec2::new(30.0, 22.0), Vec2::new(30.0, 0.0)],
+        ];
+        let l = enclosing_loop(&polys, Vec2::new(5.0, 5.0), 1e-9).unwrap();
+        assert!(shoelace(&l).abs() < 100.0 * 30.0 - 1.0, "smaller than the wall: {}", shoelace(&l).abs());
+        assert!(!crate::point_in_polygon(&l, Vec2::new(36.0, 10.0)), "the window is outside the face");
     }
 
     #[test]

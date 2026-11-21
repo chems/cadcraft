@@ -130,6 +130,21 @@ fn echo(v: &str) -> String {
     v.chars().take(MAX_ECHO_CHARS).collect()
 }
 
+/// The space a render draws: `layout` names a layout (any case) or `"Model"`; without it, `current`.
+/// A render of a layout shows the sheet as it plots, with its viewports at their scales, so an
+/// agent can look at a page before plotting it.
+pub fn render_space(d: &Drawing, p: &Value, current: &cadcraft_doc::Space) -> Result<cadcraft_doc::Space, String> {
+    match p.get("layout") {
+        None | Some(Value::Null) => Ok(current.clone()),
+        Some(Value::String(n)) if n.trim().eq_ignore_ascii_case("model") => Ok(cadcraft_doc::Space::Model),
+        Some(Value::String(n)) => d.layout(n.trim()).map(|l| cadcraft_doc::Space::Paper(l.name.clone())).ok_or_else(|| {
+            let names: Vec<&str> = d.layouts.iter().map(|l| l.name.as_str()).collect();
+            format!("no layout `{n}`; the drawing has Model and {}", names.join(", "))
+        }),
+        Some(_) => Err("`layout` must be a layout name or \"Model\"".into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

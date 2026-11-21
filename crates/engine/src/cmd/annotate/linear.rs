@@ -88,6 +88,19 @@ fn chain_run(s: &mut Session, p: &Value, baseline: bool) -> Result<Value> {
         return Err(bad(id, format!("at most {MAX_CHAIN} `points` per call")));
     }
     let pts = points_param(p, "points").ok_or_else(|| bad(id, "`points` must be a list of points"))?;
+    // `base`: the dimension to go on from, instead of the last one this session drew, so chains
+    // stay right when other dimensions are drawn in between (or by another client).
+    if let Some(v) = p.get("base").filter(|v| !v.is_null()) {
+        let h = v.as_str().and_then(Handle::parse_hex).or_else(|| v.as_u64().map(Handle)).ok_or_else(|| bad(id, "`base` must be a handle"))?;
+        let linear = s
+            .doc()?
+            .entity(h)
+            .is_some_and(|e| matches!(&e.kind, EntityKind::Dimension(d) if matches!(d.kind, DimKind::Linear { .. } | DimKind::Aligned)));
+        if !linear {
+            return Err(bad(id, format!("`base` {} is not a linear or aligned dimension", h.hex())));
+        }
+        s.last_dim = Some(h);
+    }
     // One snap index for the whole chain: looking up each new point's object by scanning the
     // drawing made long chains quadratic (the added dimensions are no snap targets).
     let snaps = if assoc_enabled(s) { Some(crate::assoc::SnapIndex::new(s.doc()?, &s.space())) } else { None };

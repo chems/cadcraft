@@ -318,8 +318,11 @@ fn run_new(s: &mut Session, p: &Value) -> Result<Value> {
         return Ok(r);
     }
     let metric = s.settings.measureinit;
-    let i = s.new_drawing(bool_or(p, "metric", metric));
-    Ok(json!({ "index": i, "title": s.docs.get(i).map(|d| d.title.clone()) }))
+    let metric = bool_or(p, "metric", metric);
+    let i = s.new_drawing(metric);
+    // The units, so a client that left `metric` out learns which ones it got.
+    let insunits = s.docs.get(i).map(|d| d.doc.header.i64("INSUNITS", 0));
+    Ok(json!({ "index": i, "title": s.docs.get(i).map(|d| d.title.clone()), "metric": metric, "insunits": insunits }))
 }
 
 fn file_name(path: &str) -> String {
