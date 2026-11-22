@@ -118,6 +118,12 @@ fn scripts_take_json_only_commands_and_name_the_failing_line() {
     let d = tool(&mut s, "inspect_drawing", json!({}));
     assert_eq!(d["currentLayer"], "A-WALL", "{d}");
     assert_eq!(d["layerCounts"]["A-WALL"], 1, "{d}");
+    // A layer named `0` is a name, not a number; an unknown layer ends CLAYER, so the next line
+    // still draws instead of being read as another layer name.
+    tool(&mut s, "script", json!({"text": "clayer 0\nclayer NOPE\nline 0,0 0,10\n\n"}));
+    let d = tool(&mut s, "inspect_drawing", json!({}));
+    assert_eq!(d["currentLayer"], "0", "{d}");
+    assert_eq!(d["layerCounts"]["0"], 1, "the line after the refused CLAYER is drawn: {d}");
     let r = call(&mut s, 7, "tools/call", json!({"name": "script", "arguments": {"text": "line 0,0 5,5\n\nnosuchcommand\n"}}));
     assert_eq!(r["result"]["isError"], true, "{r}");
     let msg = r["result"]["content"][0]["text"].as_str().unwrap_or("");

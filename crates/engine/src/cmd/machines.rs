@@ -262,8 +262,10 @@ pub fn required_params(doc: &str) -> Vec<String> {
 }
 
 /// A command that only has a JSON form, typed at the command line or in a script without its
-/// required parameters: ask for each in turn ("Enter name"), then run it with them. A typed value
-/// that reads as a JSON number, boolean, array or object is passed as one; anything else as text.
+/// required parameters: ask for each in turn ("Enter name"), then run it with them. Each value is
+/// passed as typed text first (a layer named `0` stays a name); if the command refuses that, a
+/// value that reads as a JSON number, boolean, array or object is passed as one instead. A refusal
+/// ends the command, so the lines after it in a script are not read as its parameters.
 pub struct ParamsRun {
     id: &'static str,
     keys: Vec<String>,
@@ -274,6 +276,21 @@ impl ParamsRun {
     pub fn new(id: &'static str, keys: Vec<String>) -> Self {
         ParamsRun { id, keys, got: serde_json::Map::new() }
     }
+}
+
+/// `params` with each text value that reads as another JSON value (a number, a list) as that value;
+/// `None` when there is none.
+fn typed_values(params: &serde_json::Map<String, Value>) -> Option<Value> {
+    let mut changed = false;
+    let out: serde_json::Map<String, Value> = params
+        .iter()
+        .map(|(k, v)| {
+            let parsed = v.as_str().and_then(|t| serde_json::from_str::<Value>(t).ok()).filter(|p| !p.is_string() && !p.is_null());
+            changed |= parsed.is_some();
+            (k.clone(), parsed.unwrap_or_else(|| v.clone()))
+        })
+        .collect();
+    changed.then_some(Value::Object(out))
 }
 
 impl Interactive for ParamsRun {
@@ -291,22 +308,29 @@ impl Interactive for ParamsRun {
             _ => return Ok(Step::Continue),
         };
         let Some(key) = self.keys.get(self.got.len()).cloned() else { return Ok(Step::Done) };
-        let t = text.trim();
-        let v = match serde_json::from_str::<Value>(t) {
-            Ok(v) if !v.is_string() && !v.is_null() => v,
-            _ => Value::String(t.to_string()),
-        };
-        self.got.insert(key, v);
+        self.got.insert(key, Value::String(text.trim().to_string()));
         if self.got.len() < self.keys.len() {
             return Ok(Step::Continue);
         }
         let spec = super::find_command(self.id).ok_or_else(|| EngineError::UnknownCommand(self.id.into()))?;
+        let got = std::mem::take(&mut self.got);
         // Call the command body directly: the running command records the single undo step.
-        let r = (spec.run)(s, &Value::Object(std::mem::take(&mut self.got)))?;
-        if let Some(m) = r.as_str().or_else(|| r.get("message").and_then(Value::as_str)) {
-            s.echo(m.to_string());
+        let r = match (spec.run)(s, &Value::Object(got.clone())) {
+            Err(EngineError::BadParams { .. }) if let Some(typed) = typed_values(&got) => (spec.run)(s, &typed),
+            r => r,
+        };
+        match r {
+            Ok(r) => {
+                if let Some(m) = r.as_str().or_else(|| r.get("message").and_then(Value::as_str)) {
+                    s.echo(m.to_string());
+                }
+                Ok(Step::Done)
+            }
+            Err(e) => {
+                s.echo(e.to_string());
+                Ok(Step::Cancel)
+            }
         }
-        Ok(Step::Done)
     }
 }
 
