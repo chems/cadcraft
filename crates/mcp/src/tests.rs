@@ -198,7 +198,8 @@ fn find_text_reports_overlapping_texts() {
 }
 
 /// Guards the check on the case met in practice: in a chain at 1:50, a 200 mm segment can't hold
-/// its text, which then prints over its neighbour's; text moved over the line (DIMTMOVE 2) clears it.
+/// its text, which then prints against its neighbour's ("2001600", the boxes just apart, which
+/// reads as one number); text moved over the line (DIMTMOVE 2) clears it.
 #[test]
 fn a_short_segment_in_a_chain_is_found_and_cleared_by_dimtmove() {
     let mut s = Server::new(Box::new(Headless::default()));
@@ -206,9 +207,9 @@ fn a_short_segment_in_a_chain_is_found_and_cleared_by_dimtmove() {
     let style = json!({"name": "PLAN50", "current": true, "DIMTXT": 150, "DIMTSZ": 60, "DIMGAP": 40, "DIMDEC": 0, "DIMTAD": 1});
     tool(&mut s, "execute", json!({"command": "dimstyle", "params": style}));
     let a = tool(&mut s, "execute", json!({"command": "dimlinear", "params": {"p1": [0, 0], "p2": [1000, 0], "at": [500, -600]}}));
-    tool(&mut s, "execute", json!({"command": "dimcontinue", "params": {"base": a["handle"], "points": [[1200, 0], [1600, 0]]}}));
+    tool(&mut s, "execute", json!({"command": "dimcontinue", "params": {"base": a["handle"], "points": [[1200, 0], [2800, 0]]}}));
     let t = tool(&mut s, "find_text", json!({"dimensions": true, "overlaps": true}));
-    assert!(t["overlapCount"].as_u64().unwrap_or(0) > 0, "the 200 text runs into the 400 one: {t}");
+    assert!(t["overlapCount"].as_u64().unwrap_or(0) > 0, "the 200 text runs into the 1600 one: {t}");
     tool(&mut s, "execute", json!({"command": "dimstyle", "params": {"name": "PLAN50", "DIMTMOVE": 2}}));
     let t = tool(&mut s, "find_text", json!({"dimensions": true, "overlaps": true}));
     assert_eq!(t["overlapCount"], 0, "{t}");

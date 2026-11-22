@@ -56,7 +56,7 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("usage", "Analyze Usage", usage::run).params(usage::PARAMS).noundo(),
         CommandSpec::new("loops", "Implied Loops", loops::run).params(loops::PARAMS).noundo(),
         CommandSpec::new("texts", "Query Texts", run_texts)
-            .params("{contains?: text (any case; `query` is the same filter), layer?, window?: [[x,y],[x,y]] (by insertion point), dimensions?: bool (also the dimensions' texts), overlaps?: bool (list texts that print over each other), limit? (default 200), offset?} → {count (all matches), returned, offset, texts: [{handle, type, layer, text, at, height, rotation (degrees), style, tag? (attributes), box? [[x0,y0],[x1,y1]]}], overlapCount?, overlaps?: [[a, b]]}: the readable text of TEXT, MTEXT (formatting removed), block attributes, multileaders and (with dimensions) dimensions")
+            .params("{contains?: text (any case; `query` is the same filter), layer?, window?: [[x,y],[x,y]] (by insertion point), dimensions?: bool (also the dimensions' texts), overlaps?: bool (list texts that print over each other or so close they read as one), clearance? (drawing units; default 0.3 × the smaller text height), limit? (default 200), offset?} → {count (all matches), returned, offset, texts: [{handle, type, layer, text, at, height, rotation (degrees), style, tag? (attributes), box? [[x0,y0],[x1,y1]]}], overlapCount?, overlaps?: [{texts: [a, b], gap}]}: the readable text of TEXT, MTEXT (formatting removed), block attributes, multileaders and (with dimensions) dimensions")
             .noundo(),
         CommandSpec::new("countlist", "Count List", count::run_countlist)
             .params("{space?: all (default)|current|model|<layout>, nested?: bool} → per-block counts, as COUNT")
@@ -789,7 +789,8 @@ fn run_texts(s: &mut Session, p: &Value) -> Result<Value> {
         }
     }
     let n = found.len();
-    let overlaps = want_overlaps.then(|| text_overlaps(&found, &boxes));
+    let clearance = given("clearance").and_then(Value::as_f64).filter(|c| c.is_finite() && *c >= 0.0);
+    let overlaps = want_overlaps.then(|| text_overlaps(&found, &boxes, clearance));
     let page: Vec<Value> = found.into_iter().skip(offset).take(limit).collect();
     let mut out = json!({ "count": n, "returned": page.len(), "offset": offset, "texts": page });
     if let (Some((pairs, total)), Some(o)) = (overlaps, out.as_object_mut()) {
@@ -803,10 +804,14 @@ fn run_texts(s: &mut Session, p: &Value) -> Result<Value> {
 /// runs on at most this many texts, as it compares each with every other.
 const MAX_OVERLAPS: usize = 500;
 const MAX_OVERLAP_TEXTS: usize = 20_000;
+/// Texts closer than this many times the smaller text height read as one ("200" against "1600"
+/// reads "2001600"), so they count as overlapping too.
+const CLEARANCE_HEIGHTS: f64 = 0.3;
 
-/// The pairs of found texts whose boxes overlap by more than a sliver (a tenth of the smaller
-/// text height each way): texts that print over each other.
-fn text_overlaps(found: &[Value], boxes: &[Option<cadcraft_geom::Bounds2>]) -> (Vec<Value>, usize) {
+/// The pairs of found texts that print over each other or so close they read as one: boxes that
+/// overlap, or are less than `clearance` apart both ways (by default 0.3 × the smaller text
+/// height). Each pair gives the `gap` between the boxes, negative when they overlap.
+fn text_overlaps(found: &[Value], boxes: &[Option<cadcraft_geom::Bounds2>], clearance: Option<f64>) -> (Vec<Value>, usize) {
     let mut pairs = Vec::new();
     let mut total = 0usize;
     let height = |i: usize| found.get(i).and_then(|v| v["height"].as_f64()).filter(|h| h.is_finite() && *h > 0.0).unwrap_or(0.0);
@@ -815,14 +820,16 @@ fn text_overlaps(found: &[Value], boxes: &[Option<cadcraft_geom::Bounds2>]) -> (
         let Some(a) = boxes[i] else { continue };
         for (j, b) in boxes.iter().enumerate().take(n).skip(i + 1) {
             let Some(b) = b else { continue };
-            let margin = height(i).min(height(j)) * 0.1;
+            let clear = clearance.unwrap_or_else(|| height(i).min(height(j)) * CLEARANCE_HEIGHTS);
+            // How far the boxes overlap along each axis (negative: the gap between them).
             let x = a.max.x.min(b.max.x) - a.min.x.max(b.min.x);
             let y = a.max.y.min(b.max.y) - a.min.y.max(b.min.y);
-            if x > margin && y > margin {
+            if x > -clear && y > -clear && (x > 0.0 || y > 0.0) {
                 total += 1;
                 if pairs.len() < MAX_OVERLAPS {
                     let pick = |k: usize| found.get(k).map(|v| json!({"handle": v["handle"], "type": v["type"], "text": v["text"]}));
-                    pairs.push(json!([pick(i), pick(j)]));
+                    let gap = if x > 0.0 && y > 0.0 { -x.min(y) } else { -x.min(y).min(0.0).max(-x.max(y)) };
+                    pairs.push(json!({"texts": [pick(i), pick(j)], "gap": gap}));
                 }
             }
         }
