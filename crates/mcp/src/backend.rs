@@ -32,6 +32,28 @@ pub struct Remote {
     token: Option<String>,
     /// Longest reply line accepted (`MAX_REPLY_LINE`; smaller in tests).
     max_reply: usize,
+    /// When the connection last carried a reply: one left idle longer than the app keeps it open
+    /// is replaced before the next request.
+    last_used: Option<std::time::Instant>,
+}
+
+/// The app closes a control connection that has been idle for 10 minutes; one idle this long is
+/// replaced before a request rather than written to after the app closed it.
+const STALE_AFTER: Duration = Duration::from_secs(540);
+
+/// Whether the app has closed `s` (an end of stream or an error waiting), checked without blocking
+/// and without taking any byte off the stream.
+fn peer_closed(s: &TcpStream) -> bool {
+    if s.set_nonblocking(true).is_err() {
+        return false;
+    }
+    let mut byte = [0u8; 1];
+    let closed = match s.peek(&mut byte) {
+        Ok(n) => n == 0,
+        Err(e) => e.kind() != std::io::ErrorKind::WouldBlock,
+    };
+    // A stream that can't go back to blocking reads is no use either.
+    s.set_nonblocking(false).is_err() || closed
 }
 
 /// The port component of a `HOST:PORT` address, for locating the token file.
@@ -64,7 +86,7 @@ fn read_reply_line(reader: &mut impl BufRead, reply: &mut String, max: usize) ->
 impl Remote {
     /// Connect to a running control server; its session token is read lazily when the first request is sent.
     pub fn connect(addr: &str) -> std::io::Result<Self> {
-        let mut r = Self { addr: addr.to_string(), conn: None, next_id: 1, launch: false, token: None, max_reply: MAX_REPLY_LINE };
+        let mut r = Self { addr: addr.to_string(), conn: None, next_id: 1, launch: false, token: None, max_reply: MAX_REPLY_LINE, last_used: None };
         r.reconnect()?;
         Ok(r)
     }
@@ -72,7 +94,7 @@ impl Remote {
     /// the server before the app is open. With `launch`, a call that finds nothing at `addr`
     /// opens the app with that control port first ([`launch_app`]) and waits for it.
     pub fn lazy(addr: &str, launch: bool) -> Self {
-        Self { addr: addr.to_string(), conn: None, next_id: 1, launch, token: None, max_reply: MAX_REPLY_LINE }
+        Self { addr: addr.to_string(), conn: None, next_id: 1, launch, token: None, max_reply: MAX_REPLY_LINE, last_used: None }
     }
 
     /// The per-session token for this port, read (and cached) from the owner-only token file. A
@@ -139,6 +161,12 @@ impl Remote {
     }
     /// On failure the flag says whether the request may already have reached the server.
     fn roundtrip(&mut self, line: &str) -> Result<String, (std::io::Error, bool)> {
+        // A connection the app closed while it sat idle would take the request and lose its reply,
+        // so a change could not be told applied or not: open a fresh one first.
+        let stale = self.last_used.is_some_and(|t| t.elapsed() >= STALE_AFTER);
+        if stale || self.conn.as_ref().is_some_and(|(_, s)| peer_closed(s)) {
+            self.conn = None;
+        }
         if self.conn.is_none() {
             self.reach().map_err(|e| (e, false))?;
         }
@@ -156,7 +184,10 @@ impl Remote {
                 self.conn = None;
                 Err((std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "connection closed"), true))
             }
-            Ok(_) => Ok(reply),
+            Ok(_) => {
+                self.last_used = Some(std::time::Instant::now());
+                Ok(reply)
+            }
             Err(e) => {
                 self.conn = None;
                 Err((e, true))
@@ -662,6 +693,23 @@ mod tests {
                 seen += 1;
             }
         })
+    }
+
+    /// The app closes a connection that sat idle; the next change goes over a fresh connection
+    /// and is applied, instead of being written to the closed one and reported lost.
+    #[test]
+    fn a_connection_the_app_closed_is_replaced_before_a_change() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        // One request per connection, then the connection is closed, as an idle timeout closes it.
+        let server = fake_app(listener, |_, n| json!({"ok": true, "result": n}));
+        let mut remote = Remote::connect(&addr).unwrap();
+        assert_eq!(remote.call("ping", json!({})), Ok(json!(0)));
+        std::thread::sleep(Duration::from_millis(50));
+        let changed = remote.call("engine.execute", json!({"command": "circle", "params": {}}));
+        assert_eq!(changed, Ok(json!(1)), "the change reaches the app on a new connection");
+        drop(remote);
+        assert_eq!(server.join().unwrap(), 2);
     }
 
     /// A listener on another loopback address with the desktop's port (here `::1`) never receives
