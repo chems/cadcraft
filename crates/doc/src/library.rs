@@ -48,7 +48,57 @@ pub fn standard_linetypes() -> Vec<Linetype> {
             ],
         },
         s("ZIGZAG", "Zig zag /\\/\\/\\/\\/", &[0.0001, -0.2, 0.0001, -0.2]),
+        // Building services runs, each named by a short label set in the line (the letters most
+        // drawings use; projects with other codes load their own .lin file).
+        labelled("WATER_COLD", "Cold water ---- CW ----", "CW"),
+        labelled("WATER_HOT", "Hot water ---- HW ----", "HW"),
+        labelled("WATER_HOT_RETURN", "Hot water return ---- HWR ----", "HWR"),
+        labelled("HEATING_FLOW", "Heating flow ---- HF ----", "HF"),
+        labelled("HEATING_RETURN", "Heating return ---- HR ----", "HR"),
+        labelled("WASTE_WATER", "Waste water ---- WW ----", "WW"),
+        labelled("RAIN_WATER", "Rainwater ---- RW ----", "RW"),
+        labelled("GAS_LINE", "Gas ---- G ----", "G"),
+        labelled("POWER_LINE", "Power cable ---- E ----", "E"),
+        labelled("DATA_LINE", "Data and telecom ---- D ----", "D"),
+        s("PROPERTY_LINE", "Property line ______ . . ______ . .", &[1.0, -0.125, 0.0, -0.125, 0.0, -0.125]),
     ]
+}
+
+/// Height of the label of a [`labelled`] linetype (inches; 2.54 mm in a metric drawing).
+const LABEL_HEIGHT: f64 = 0.1;
+/// Length of the dash between two labels (inches).
+const LABEL_DASH: f64 = 0.6;
+
+/// A line with `label` set in it at every repeat: a dash, then a gap as wide as the label and a
+/// margin on each side, the label centred in the gap and upright along the line.
+fn labelled(name: &str, description: &str, label: &str) -> Linetype {
+    // The drafting font advances about 0.9 x the height per character.
+    let chars = f64::from(u32::try_from(label.chars().count()).unwrap_or(u32::MAX));
+    let half = (0.9 * LABEL_HEIGHT * chars) / 2.0;
+    let margin = LABEL_HEIGHT * 0.6;
+    Linetype {
+        name: name.into(),
+        description: description.into(),
+        pattern: vec![
+            DashElement::dash(LABEL_DASH),
+            // The label goes where its element ends, the middle of the gap, moved back half its
+            // width and down half its height so it sits centred on the line.
+            DashElement {
+                text: Some(label.into()),
+                style: Some("Standard".into()),
+                scale: LABEL_HEIGHT,
+                offset: cadcraft_geom::Vec2::new(-half, -LABEL_HEIGHT / 2.0),
+                ..DashElement::dash(-(half + margin))
+            },
+            DashElement::dash(-(half + margin)),
+        ],
+    }
+}
+
+/// `p`, drawn in millimetres, as a library pattern (defined in inches like the others), so a
+/// metric drawing draws it at its real size at hatch scale 1.
+fn real_size_mm(p: HatchPattern) -> HatchPattern {
+    scaled_pattern(p, 1.0 / 25.4)
 }
 
 /// The standard linetypes as loaded into `d`. In a metric drawing (`MEASUREMENT` 1) every length
@@ -234,6 +284,53 @@ pub fn standard_patterns() -> Vec<HatchPattern> {
             },
             16.0,
         ),
+        // Outdoor surfaces at their real size in a metric drawing (hatch scale 1), drawn for
+        // CADCraft: slabs, block pavers, timber decking, gravel, planting and water.
+        real_size_mm(HatchPattern {
+            name: "PAVING_SLABS",
+            description: "Square paving slabs 400 x 400",
+            lines: vec![pl(0.0, (0.0, 0.0), (0.0, 400.0), &[]), pl(90.0, (0.0, 0.0), (0.0, 400.0), &[])],
+        }),
+        real_size_mm(HatchPattern {
+            name: "PAVERS",
+            description: "Block pavers 200 x 100, stretcher bond",
+            lines: vec![
+                pl(0.0, (0.0, 0.0), (0.0, 100.0), &[]),
+                pl(90.0, (0.0, 0.0), (0.0, 200.0), &[100.0, -100.0]),
+                pl(90.0, (100.0, 0.0), (0.0, 200.0), &[-100.0, 100.0]),
+            ],
+        }),
+        real_size_mm(HatchPattern {
+            name: "DECKING",
+            description: "Timber decking, boards 145 wide, staggered butt joints",
+            lines: vec![
+                pl(0.0, (0.0, 0.0), (0.0, 145.0), &[]),
+                pl(90.0, (0.0, 0.0), (0.0, 2400.0), &[145.0, -290.0]),
+                pl(90.0, (800.0, 145.0), (0.0, 2400.0), &[145.0, -290.0]),
+                pl(90.0, (1600.0, 290.0), (0.0, 2400.0), &[145.0, -290.0]),
+            ],
+        }),
+        real_size_mm(HatchPattern {
+            name: "GRAVEL_BED",
+            description: "Gravel or chippings",
+            lines: vec![
+                pl(0.0, (0.0, 0.0), (51.0, 69.0), &[0.0, -123.0]),
+                pl(60.0, (15.0, 21.0), (87.0, 57.0), &[12.0, -159.0]),
+                pl(120.0, (33.0, 9.0), (69.0, 93.0), &[9.0, -141.0]),
+                pl(15.0, (6.0, 39.0), (111.0, 87.0), &[0.0, -183.0]),
+            ],
+        }),
+        real_size_mm(HatchPattern {
+            name: "PLANTING",
+            description: "Planting bed, shrubs and ground cover",
+            // Small crosses on a 300 grid: each horizontal dash is crossed at its middle.
+            lines: vec![pl(0.0, (0.0, 0.0), (0.0, 300.0), &[60.0, -240.0]), pl(90.0, (30.0, -30.0), (0.0, 300.0), &[60.0, -240.0])],
+        }),
+        real_size_mm(HatchPattern {
+            name: "WATER_SURFACE",
+            description: "Pond or pool water surface",
+            lines: vec![pl(0.0, (0.0, 0.0), (225.0, 150.0), &[300.0, -150.0, 100.0, -150.0])],
+        }),
     ]
 }
 
@@ -265,6 +362,42 @@ fn scaled_pattern(mut p: HatchPattern, k: f64) -> HatchPattern {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A name the library defined twice would load whichever came first: every linetype and
+    /// pattern name is defined once (in any case).
+    #[test]
+    fn library_names_are_unique() {
+        let mut names: Vec<String> = standard_linetypes().into_iter().map(|l| l.name.to_ascii_uppercase()).collect();
+        let n = names.len();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), n, "a linetype name is defined twice");
+        let mut names: Vec<String> = standard_patterns().into_iter().map(|p| p.name.to_ascii_uppercase()).collect();
+        let n = names.len();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), n, "a pattern name is defined twice");
+    }
+
+    /// A labelled run leaves a gap wider than its label, and the label sits inside the gap, so
+    /// the text never runs over the dashes either side.
+    #[test]
+    fn a_labelled_linetype_leaves_room_for_its_label() {
+        for lt in standard_linetypes().iter().filter(|l| l.pattern.iter().any(|e| e.text.is_some())) {
+            let gap: f64 = lt.pattern.iter().filter(|e| e.length < 0.0).map(|e| -e.length).sum();
+            let Some(text) = lt.pattern.iter().find(|e| e.text.is_some()) else { continue };
+            let width = 0.9 * text.scale * text.text.as_deref().map_or(0.0, |t| t.chars().count() as f64);
+            assert!(gap > width, "{}: gap {gap} for a label {width} wide", lt.name);
+        }
+    }
+
+    /// Outdoor surfaces are drawn at their real size in a metric drawing: decking boards 145 mm
+    /// apart at hatch scale 1.
+    #[test]
+    fn outdoor_patterns_are_real_size_in_metric_drawings() {
+        let deck = pattern_for(&Drawing::new_metric(), "DECKING").map(|p| p.lines[0].delta.1);
+        assert!(deck.is_some_and(|d| (d - 145.0).abs() < 1e-9), "{deck:?}");
+    }
 
     #[test]
     fn metric_drawings_draw_iso_scaled_patterns() {

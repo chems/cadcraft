@@ -5,7 +5,7 @@ name: Build Windows (test)
 on:
   workflow_dispatch:
   push:
-    branches: [mcp-corrections]
+    branches: [mcp-corrections, plans-techniques]
 
 permissions:
   contents: read
